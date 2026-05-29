@@ -1,0 +1,3211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="screen-orientation" content="landscape">
+<title>540 打牌</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+#rotate-hint {
+  display: none;
+  position: fixed; inset: 0;
+  background: #1a3a1a; color: #ffd700;
+  font-size: 28px; z-index: 999;
+  justify-content: center; align-items: center;
+}
+@media (orientation: portrait) {
+  #rotate-hint { display: flex; }
+  canvas { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="rotate-hint">请横屏游玩</div>
+<canvas id="game"></canvas>
+<script>
+(function() {
+// =========================================================================
+// card.js
+// =========================================================================
+
+/**
+ * card.js - 540打牌游戏牌组定义
+ * 126张牌：4副牌去掉4,6,7,8,9（保留2张3）
+ *
+ * Translated from game_540/card.py (Python → ES module JS)
+ */
+
+// ---------------------------------------------------------------------------
+// Suit constants
+// ---------------------------------------------------------------------------
+const SUIT_SPADES   = 'spades';
+const SUIT_HEARTS   = 'hearts';
+const SUIT_CLUBS    = 'clubs';
+const SUIT_DIAMONDS = 'diamonds';
+const SUIT_SPECIAL  = 'special';
+
+const SUITS = [SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS];
+
+const SUIT_DISPLAY = {
+    [SUIT_SPADES]:   '♠',
+    [SUIT_HEARTS]:   '♥',
+    [SUIT_CLUBS]:    '♣',
+    [SUIT_DIAMONDS]: '♦',
+    [SUIT_SPECIAL]:  '',
+};
+
+const SUIT_COLOR = {
+    [SUIT_SPADES]:   'black',
+    [SUIT_HEARTS]:   'red',
+    [SUIT_CLUBS]:    'black',
+    [SUIT_DIAMONDS]: 'red',
+    [SUIT_SPECIAL]:  'black',
+};
+
+// ---------------------------------------------------------------------------
+// Rank constants
+// ---------------------------------------------------------------------------
+const REGULAR_RANKS = ['A', '2', '5', '10', 'J', 'Q', 'K'];
+
+const RANK_SMALL_JOKER = 'small_joker';
+const RANK_BIG_JOKER   = 'big_joker';
+const RANK_CHARACTER   = 'character';
+const RANK_THREE       = '3';
+
+const SPECIAL_RANKS = [RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER];
+
+const RANK_DISPLAY = {
+    'A':  'A',
+    '2':  '2',
+    '3':  '3',
+    '5':  '5',
+    '10': '10',
+    'J':  'J',
+    'Q':  'Q',
+    'K':  'K',
+    [RANK_SMALL_JOKER]: '小王',
+    [RANK_BIG_JOKER]:   '大王',
+    [RANK_CHARACTER]:   '字牌',
+};
+
+const REGULAR_RANK_ORDER = {
+    '5':  5,
+    'J':  11,
+    'Q':  12,
+    'K':  13,
+    'A':  14,
+    '2':  2,
+    '10': 10,
+};
+
+// ---------------------------------------------------------------------------
+// Card class
+// ---------------------------------------------------------------------------
+class Card {
+    /**
+     * @param {string} suit - One of the SUIT_* constants
+     * @param {string} rank - One of the REGULAR_RANKS, RANK_THREE, or SPECIAL_RANKS
+     */
+    constructor(suit, rank) {
+        this.suit      = suit;
+        this.rank      = rank;
+        this.playOrder = 0;   // camelCase equivalent of play_order
+    }
+
+    /**
+     * Returns the point value of this card (0, 5, or 10).
+     * @returns {number}
+     */
+    scoreValue() {
+        if (this.rank === '5') return 5;
+        if (
+            this.rank === '10'           ||
+            this.rank === 'K'            ||
+            this.rank === RANK_SMALL_JOKER ||
+            this.rank === RANK_BIG_JOKER   ||
+            this.rank === RANK_CHARACTER   ||
+            this.rank === RANK_THREE
+        ) return 10;
+        return 0;
+    }
+
+    /**
+     * Returns true if this card belongs to the special suit (jokers, character, 3).
+     * @returns {boolean}
+     */
+    isSpecial() {
+        return this.suit === SUIT_SPECIAL;
+    }
+
+    /**
+     * Returns the display string for this card (e.g. "♠A", "大王").
+     * @returns {string}
+     */
+    displayName() {
+        if (this.suit === SUIT_SPECIAL) {
+            return RANK_DISPLAY[this.rank] ?? this.rank;
+        }
+        const suitSym = SUIT_DISPLAY[this.suit] ?? this.suit;
+        const rankSym = RANK_DISPLAY[this.rank] ?? this.rank;
+        return `${suitSym}${rankSym}`;
+    }
+
+    /**
+     * Value equality — two cards are equal if suit and rank match.
+     * @param {Card} other
+     * @returns {boolean}
+     */
+    equals(other) {
+        if (!(other instanceof Card)) return false;
+        return this.suit === other.suit && this.rank === other.rank;
+    }
+
+    /**
+     * String representation (useful for debugging).
+     * @returns {string}
+     */
+    toString() {
+        return this.displayName();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deck helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Fisher-Yates in-place shuffle.
+ * @param {Array} arr - Array to shuffle (mutated in place)
+ * @returns {Array} The same array, shuffled
+ */
+function shuffleArray(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+/**
+ * Builds a fresh 126-card deck (unshuffled).
+ * 4 copies of each regular suit × regular rank,
+ * 4 copies of each special rank (small joker, big joker, character),
+ * plus 2 extra threes (♠3).
+ * @returns {Card[]}
+ */
+function buildDeck() {
+    const deck = [];
+
+    for (let copy = 0; copy < 4; copy++) {
+        for (const suit of SUITS) {
+            for (const rank of REGULAR_RANKS) {
+                deck.push(new Card(suit, rank));
+            }
+        }
+        for (const rank of SPECIAL_RANKS) {
+            deck.push(new Card(SUIT_SPECIAL, rank));
+        }
+    }
+
+    // Two extra ♠3 cards
+    deck.push(new Card(SUIT_SPADES, RANK_THREE));
+    deck.push(new Card(SUIT_SPADES, RANK_THREE));
+
+    if (deck.length !== 126) {
+        throw new Error(`Expected 126 cards, got ${deck.length}`);
+    }
+    return deck;
+}
+
+/**
+ * Shuffles a copy of deck and deals it into three hands of 42 cards each.
+ * @param {Card[]} deck - The full 126-card deck
+ * @returns {[Card[], Card[], Card[]]} Three hands: [hand0, hand1, hand2]
+ */
+function shuffleAndDeal(deck) {
+    const shuffled = shuffleArray([...deck]);
+    return [
+        shuffled.slice(0, 42),
+        shuffled.slice(42, 84),
+        shuffled.slice(84, 126),
+    ];
+}
+
+/**
+ * Sums the score values of an array of cards.
+ * @param {Card[]} cards
+ * @returns {number}
+ */
+function totalScore(cards) {
+    return cards.reduce((sum, c) => sum + c.scoreValue(), 0);
+}
+
+// =========================================================================
+// rules.js
+// =========================================================================
+
+/**
+ * rules.js - 540打牌游戏规则引擎
+ *
+ * Translated from game_540/rules.py (Python → ES module JS)
+ */
+
+// ---------------------------------------------------------------------------
+// Suit priority (used for trump calling tie-breaks)
+// ---------------------------------------------------------------------------
+const SUIT_PRIORITY = {
+    [SUIT_SPADES]:   4,
+    [SUIT_HEARTS]:   3,
+    [SUIT_CLUBS]:    2,
+    [SUIT_DIAMONDS]: 1,
+};
+
+// ---------------------------------------------------------------------------
+// Trump helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the card is a trump card given the current trump suit.
+ * @param {Card} card
+ * @param {string|null} trumpSuit
+ * @returns {boolean}
+ */
+function isTrump(card, trumpSuit) {
+    if (card.rank === RANK_THREE || card.rank === RANK_CHARACTER ||
+        card.rank === RANK_BIG_JOKER || card.rank === RANK_SMALL_JOKER) return true;
+    if (card.rank === '10' || card.rank === '2') return true;
+    if (trumpSuit && card.suit === trumpSuit) return true;
+    return false;
+}
+
+/**
+ * Returns the logical suit of a card ('trump' or the card's actual suit).
+ * @param {Card} card
+ * @param {string|null} trumpSuit
+ * @returns {string}
+ */
+function getSuitOfCard(card, trumpSuit) {
+    if (isTrump(card, trumpSuit)) return 'trump';
+    return card.suit;
+}
+
+/**
+ * Returns a numeric power value for a card (higher = stronger).
+ * @param {Card} card
+ * @param {string|null} trumpSuit
+ * @param {number} [playOrder=0]
+ * @returns {number}
+ */
+function cardPower(card, trumpSuit, playOrder = 0) {
+    const rank = card.rank;
+    const suit = card.suit;
+
+    if (rank === RANK_THREE)      return 10000;
+    if (rank === RANK_CHARACTER)  return 9900;
+    if (rank === RANK_BIG_JOKER)  return 9800;
+    if (rank === RANK_SMALL_JOKER) return 9700;
+
+    if (trumpSuit === null || trumpSuit === undefined) {
+        if (rank === '10') return 9500 - playOrder;
+        if (rank === '2')  return 9400 - playOrder;
+        const suitIdx = SUITS.includes(suit) ? SUITS.indexOf(suit) : 0;
+        const rankVal = REGULAR_RANK_ORDER[rank] ?? 0;
+        return suitIdx * 100 + rankVal;
+    } else {
+        const isTrumpSuit = (suit === trumpSuit);
+        if (rank === '10' && isTrumpSuit)  return 9600;
+        if (rank === '10' && !isTrumpSuit) return 9500 - playOrder;
+        if (rank === '2'  && isTrumpSuit)  return 9400;
+        if (rank === '2'  && !isTrumpSuit) return 9300 - playOrder;
+        if (suit === trumpSuit) {
+            const rankVal = REGULAR_RANK_ORDER[rank] ?? 0;
+            return 1000 + rankVal;
+        }
+        const suitIdx = SUITS.includes(suit) ? SUITS.indexOf(suit) : 0;
+        const rankVal = REGULAR_RANK_ORDER[rank] ?? 0;
+        return suitIdx * 100 + rankVal;
+    }
+}
+
+/**
+ * Returns the strongest card from a group.
+ * @param {Card[]} cards
+ * @param {string|null} trumpSuit
+ * @returns {Card}
+ */
+function bestCardInGroup(cards, trumpSuit) {
+    return cards.reduce((best, c) =>
+        cardPower(c, trumpSuit, c.playOrder) > cardPower(best, trumpSuit, best.playOrder) ? c : best
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pair-grouping key
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a grouping key for pairing purposes (handles cross-suit 10s and 2s).
+ * @param {Card} card
+ * @param {string|null} trumpSuit
+ * @returns {string}
+ */
+function pairKey(card, trumpSuit) {
+    const rank = card.rank;
+    const suit = card.suit;
+
+    if (trumpSuit !== null && trumpSuit !== undefined) {
+        if (rank === '10' && suit !== trumpSuit && suit !== SUIT_SPECIAL) return 'non_trump_10';
+        if (rank === '2'  && suit !== trumpSuit && suit !== SUIT_SPECIAL) return 'non_trump_2';
+    } else {
+        if (rank === '10' && suit !== SUIT_SPECIAL) return 'all_10';
+        if (rank === '2'  && suit !== SUIT_SPECIAL) return 'all_2';
+    }
+    return `${suit}_${rank}`;
+}
+
+// ---------------------------------------------------------------------------
+// Hand analysis helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Counts occurrences of each display name in a card array.
+ * @param {Card[]} cards
+ * @returns {Map<string, number>}
+ */
+function countSame(cards) {
+    const counter = new Map();
+    for (const c of cards) {
+        const name = c.displayName();
+        counter.set(name, (counter.get(name) ?? 0) + 1);
+    }
+    return counter;
+}
+
+/**
+ * Returns all pairs from a hand (as [Card, Card] arrays).
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Array<[Card, Card]>}
+ */
+function getPairs(hand, trumpSuit) {
+    const groups = new Map();
+    for (const card of hand) {
+        const key = pairKey(card, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(card);
+    }
+    const pairs = [];
+    for (const group of groups.values()) {
+        if (group.length >= 2) pairs.push([group[0], group[1]]);
+    }
+    return pairs;
+}
+
+/**
+ * Returns all triples from a hand (as Card[3] arrays).
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Array<Card[]>}
+ */
+function getTriples(hand, trumpSuit) {
+    const groups = new Map();
+    for (const card of hand) {
+        const key = pairKey(card, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(card);
+    }
+    const triples = [];
+    for (const group of groups.values()) {
+        if (group.length >= 3) triples.push(group.slice(0, 3));
+    }
+    return triples;
+}
+
+/**
+ * Returns all bombs (4-of-a-kind groups) from a hand.
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Array<Card[]>}
+ */
+function getBombs(hand, trumpSuit) {
+    const groups = new Map();
+    for (const card of hand) {
+        const key = pairKey(card, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(card);
+    }
+    const bombs = [];
+    for (const group of groups.values()) {
+        if (group.length >= 4) bombs.push(group.slice(0, 4));
+    }
+    return bombs;
+}
+
+// ---------------------------------------------------------------------------
+// Consecutive pairs / triples ordering
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the ordering index of a pair within the trump sequence.
+ * @param {Array<Card>} pair - A [Card, Card] array
+ * @param {string|null} trumpSuit
+ * @returns {number}
+ */
+function trumpPairOrder(pair, trumpSuit) {
+    const card = pair[0];
+    const rank = card.rank;
+    const suit = card.suit;
+
+    if (trumpSuit === null || trumpSuit === undefined) {
+        const orderMap = {
+            [RANK_THREE]:      6,
+            [RANK_CHARACTER]:  5,
+            [RANK_BIG_JOKER]:  4,
+            [RANK_SMALL_JOKER]: 3,
+            '10': 2,
+            '2':  1,
+        };
+        return orderMap[rank] ?? -1;
+    } else {
+        if (rank === RANK_THREE)      return 14;
+        if (rank === RANK_CHARACTER)  return 13;
+        if (rank === RANK_BIG_JOKER)  return 12;
+        if (rank === RANK_SMALL_JOKER) return 11;
+        if (rank === '10' && suit === trumpSuit) return 10;
+        if (rank === '10') return 9;
+        if (rank === '2'  && suit === trumpSuit) return 8;
+        if (rank === '2') return 7;
+        const regularOrder = { 'A': 6, 'K': 5, 'Q': 4, 'J': 3, '5': 2 };
+        if (suit === trumpSuit) return regularOrder[rank] ?? -1;
+        return -1;
+    }
+}
+
+/**
+ * Returns true if the given array of pairs forms a consecutive sequence.
+ * @param {Array<Array<Card>>} pairs
+ * @param {string|null} trumpSuit
+ * @returns {boolean}
+ */
+function isConsecutivePairs(pairs, trumpSuit) {
+    if (pairs.length < 2) return true;
+    const orders = pairs.map(p => trumpPairOrder(p, trumpSuit)).sort((a, b) => a - b);
+    if (orders.some(o => o < 0)) return false;
+    for (let i = 1; i < orders.length; i++) {
+        if (orders[i] - orders[i - 1] !== 1) return false;
+    }
+    return true;
+}
+
+/**
+ * Returns true if the cards form a valid consecutive pairs play.
+ * @param {Card[]} cards
+ * @param {string|null} trumpSuit
+ * @returns {boolean}
+ */
+function isValidConsecutivePairs(cards, trumpSuit) {
+    if (cards.length < 4 || cards.length % 2 !== 0) return false;
+
+    const groups = new Map();
+    for (const c of cards) {
+        const key = pairKey(c, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+    }
+
+    const pairGroups = [...groups.values()].filter(g => g.length >= 2);
+    if (pairGroups.reduce((sum, g) => sum + 2, 0) !== cards.length) return false;
+
+    const pairs = pairGroups.map(g => [g[0], g[1]]);
+    return isConsecutivePairs(pairs, trumpSuit);
+}
+
+// ---------------------------------------------------------------------------
+// Trump calling / counter
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the given cards constitute a valid trump call.
+ * @param {Card[]} cards
+ * @returns {boolean}
+ */
+function canCallTrump(cards) {
+    if (cards.length === 0) return false;
+    if (cards.length === 1 && cards[0].rank === '10') return true;
+    if (cards.length === 2) {
+        const [c1, c2] = cards;
+        if (c1.rank === c2.rank &&
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(c1.rank))
+            return true;
+    }
+    if (cards.length === 3) {
+        const ranks = cards.map(c => c.rank);
+        if (new Set(ranks).size === 1 &&
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0]))
+            return true;
+    }
+    if (cards.length === 4) {
+        const ranks = cards.map(c => c.rank);
+        if (new Set(ranks).size === 1 &&
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0]))
+            return true;
+    }
+    return false;
+}
+
+/**
+ * Returns true if newCards can counter (override) the currentCall.
+ * @param {Card[]} newCards
+ * @param {Card[]} currentCall
+ * @returns {boolean}
+ */
+function canCounterTrump(newCards, currentCall) {
+    if (!canCallTrump(newCards)) return false;
+    const newN = newCards.length;
+    const curN = currentCall.length;
+    if (newN > curN) return true;
+    if (newN < curN) return false;
+
+    const newRank = newCards[0].rank;
+    const curRank = currentCall[0].rank;
+    const rankPower = {
+        '10': 1,
+        [RANK_SMALL_JOKER]: 2,
+        [RANK_BIG_JOKER]:   3,
+        [RANK_CHARACTER]:   4,
+        [RANK_THREE]:       5,
+    };
+    const newRp = rankPower[newRank] ?? 0;
+    const curRp = rankPower[curRank] ?? 0;
+    if (newRp > curRp) return true;
+    if (newRp < curRp) return false;
+
+    const newSuitP = SUIT_PRIORITY[newCards[0].suit] ?? 0;
+    const curSuitP = SUIT_PRIORITY[currentCall[0].suit] ?? 0;
+    return newSuitP > curSuitP;
+}
+
+// ---------------------------------------------------------------------------
+// PlayType enum-like object
+// ---------------------------------------------------------------------------
+
+/**
+ * Constants representing the type of a card play.
+ */
+const PlayType = Object.freeze({
+    SINGLE:         'single',
+    PAIR:           'pair',
+    TRIPLE:         'triple',
+    BOMB:           'bomb',
+    CONSEC_PAIRS:   'consec_pairs',
+    CONSEC_TRIPLES: 'consec_triples',
+    INVALID:        'invalid',
+});
+
+// ---------------------------------------------------------------------------
+// Play type detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the PlayType of a set of cards played together.
+ * @param {Card[]} cards
+ * @param {string|null} trumpSuit
+ * @returns {string} One of the PlayType constants
+ */
+function getPlayType(cards, trumpSuit) {
+    const n = cards.length;
+    if (n === 0) return PlayType.INVALID;
+    if (n === 1) return PlayType.SINGLE;
+
+    const groups = new Map();
+    for (const c of cards) {
+        const key = pairKey(c, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+    }
+    const counts = [...groups.values()].map(g => g.length).sort((a, b) => a - b);
+
+    if (n === 2 && counts.length === 1 && counts[0] === 2) return PlayType.PAIR;
+    if (n === 3 && counts.length === 1 && counts[0] === 3) return PlayType.TRIPLE;
+    if (n === 4 && counts.length === 1 && counts[0] === 4) return PlayType.BOMB;
+
+    if (n % 2 === 0 && [...groups.values()].every(g => g.length >= 2)) {
+        const pairs = [...groups.values()].filter(g => g.length >= 2).map(g => [g[0], g[1]]);
+        if (pairs.length === n / 2 && isConsecutivePairs(pairs, trumpSuit)) return PlayType.CONSEC_PAIRS;
+    }
+
+    if (n % 3 === 0 && [...groups.values()].every(g => g.length >= 3)) {
+        const triplesPairs = [...groups.values()].filter(g => g.length >= 3).map(g => [g[0], g[1]]);
+        if (triplesPairs.length === n / 3 && isConsecutivePairs(triplesPairs, trumpSuit)) return PlayType.CONSEC_TRIPLES;
+    }
+
+    return PlayType.INVALID;
+}
+
+// ---------------------------------------------------------------------------
+// Suit following helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the suit that followers must match ('trump' or a regular suit).
+ * @param {Card[]} ledCards
+ * @param {string|null} trumpSuit
+ * @returns {string}
+ */
+function getFollowSuit(ledCards, trumpSuit) {
+    if (!ledCards || ledCards.length === 0) return 'trump';
+    return getSuitOfCard(ledCards[0], trumpSuit);
+}
+
+/**
+ * Filters a hand to only cards of the given logical suit.
+ * @param {Card[]} hand
+ * @param {string} suit
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function filterHandBySuit(hand, suit, trumpSuit) {
+    return hand.filter(c => getSuitOfCard(c, trumpSuit) === suit);
+}
+
+/**
+ * Returns true if card can beat currentBest in a single-card comparison.
+ * @param {Card} card
+ * @param {Card} currentBest
+ * @param {string|null} trumpSuit
+ * @param {number} [cardOrder=0]
+ * @param {number} [bestOrder=0]
+ * @returns {boolean}
+ */
+function canBeatSingle(card, currentBest, trumpSuit, cardOrder = 0, bestOrder = 0) {
+    const cardIsTrump = isTrump(card, trumpSuit);
+    const bestIsTrump = isTrump(currentBest, trumpSuit);
+    if (cardIsTrump && !bestIsTrump) return true;
+    if (!cardIsTrump && bestIsTrump) return false;
+    return cardPower(card, trumpSuit, cardOrder) > cardPower(currentBest, trumpSuit, bestOrder);
+}
+
+// ---------------------------------------------------------------------------
+// Chinese suit name map (for error messages)
+// ---------------------------------------------------------------------------
+const _SUIT_CN = {
+    spades:   '黑桃',
+    hearts:   '红心',
+    clubs:    '梅花',
+    diamonds: '方块',
+    trump:    '主牌',
+};
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the player's hand contains a card that can beat the current best.
+ * @param {Card[]} hand
+ * @param {Card[]} currentBest
+ * @param {Card[]} ledCards
+ * @param {string|null} trumpSuit
+ * @returns {boolean}
+ */
+function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
+    const ledSuit = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    if (!currentBest || currentBest.length === 0) return false;
+    const bestPower = Math.max(...currentBest.map(c => cardPower(c, trumpSuit, c.playOrder)));
+    for (const card of handInSuit) {
+        if (cardPower(card, trumpSuit, 0) > bestPower) return true;
+    }
+    return false;
+}
+
+/**
+ * Returns true if followCards beats currentBest.
+ * @param {Card[]} followCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @returns {boolean}
+ */
+function doesBeat(followCards, currentBest, trumpSuit) {
+    const followType = getPlayType(followCards, trumpSuit);
+    if (followType === PlayType.BOMB) return true;
+    if (!currentBest || currentBest.length === 0) return true;
+
+    const followPower = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
+    const bestPower   = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
+
+    const followTrump = followCards.some(c => isTrump(c, trumpSuit));
+    const bestTrump   = currentBest.some(c => isTrump(c, trumpSuit));
+
+    if (followTrump && !bestTrump) return true;
+    if (!followTrump && bestTrump) return false;
+    return followPower > bestPower;
+}
+
+// ---------------------------------------------------------------------------
+// Main validation entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates whether followCards is a legal play given the led cards, hand, etc.
+ * Returns [isValid: boolean, errorMessage: string].
+ * @param {Card[]} followCards
+ * @param {Card[]} ledCards
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @param {Card[]|null} currentBest
+ * @returns {[boolean, string]}
+ */
+function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasScore, currentBest) {
+    const ledType    = getPlayType(ledCards, trumpSuit);
+    const followType = getPlayType(followCards, trumpSuit);
+    const ledSuit    = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    const n = ledCards.length;
+
+    // Bombs can always be played (against plays of <= 4 cards)
+    if (followType === PlayType.BOMB) {
+        if (n <= 4) return [true, ''];
+        return [false, '炸弹只能炸4张及以内的牌'];
+    }
+
+    // Must play the correct number of cards
+    if (followCards.length !== n) {
+        if (hand.length < n) {
+            if (followCards.length !== hand.length) return [false, `应出${hand.length}张（手牌不足）`];
+        } else {
+            return [false, `应出${n}张牌`];
+        }
+    }
+
+    // Must follow suit if possible
+    if (handInSuit.length > 0) {
+        const followInSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
+        const need = Math.min(n, handInSuit.length);
+        if (followInSuit.length < need) {
+            return [false, `必须跟${_SUIT_CN[ledSuit] ?? ledSuit}花色（手中还有${handInSuit.length}张）`];
+        }
+    }
+
+    // 能压必压 rule (must beat if possible, when trick has score)
+    if (trickHasScore && currentBest) {
+        const canBeat = _canPlayerBeat(hand, currentBest, ledCards, trumpSuit);
+        if (canBeat) {
+            const isBeating = doesBeat(followCards, currentBest, trumpSuit);
+            if (!isBeating) return [false, '前面有分牌，能压必压'];
+            return [true, ''];
+        }
+    }
+
+    // Rule: no voluntary score discard
+    const followScore = followCards.reduce((sum, c) => sum + c.scoreValue(), 0);
+    if (followScore > 0) {
+        const nonScoreInSuit = handInSuit.filter(c => c.scoreValue() === 0);
+        if (nonScoreInSuit.length >= n) return [false, '不能主动垫分牌'];
+    }
+
+    return [true, ''];
+}
+
+// ---------------------------------------------------------------------------
+// AI / game helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the recommended lead (pairs if available, otherwise biggest single).
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function mustLeadPairOrBiggest(hand, trumpSuit) {
+    const pairs = getPairs(hand, trumpSuit);
+    if (pairs.length > 0) {
+        const best = pairs.reduce((bestPair, p) =>
+            cardPower(p[0], trumpSuit) > cardPower(bestPair[0], trumpSuit) ? p : bestPair
+        );
+        return [...best];
+    }
+    const biggest = hand.reduce((b, c) => cardPower(c, trumpSuit) > cardPower(b, trumpSuit) ? c : b);
+    return [biggest];
+}
+
+/**
+ * Returns padding cards to bring a play up to 4 cards (for bombs).
+ * @param {Card[]} hand
+ * @param {Card[]} originalPlay
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function getPadCards(hand, originalPlay, trumpSuit) {
+    const nPad = 4 - originalPlay.length;
+    if (nPad <= 0) return [];
+
+    const available = hand.filter(c => !originalPlay.includes(c));
+    let pad = [];
+
+    if (originalPlay.length === 1) {
+        const triples = getTriples(available, trumpSuit);
+        if (triples.length > 0) {
+            pad = triples[0].slice(0, 3);
+        } else {
+            const pairs = getPairs(available, trumpSuit);
+            if (pairs.length > 0) {
+                const pair = [...pairs[0]];
+                const remaining = available.filter(c => !pair.includes(c));
+                if (remaining.length > 0) pad = [...pair, remaining[0]];
+                else pad = pair;
+            } else {
+                pad = available.slice(0, 3);
+            }
+        }
+    } else if (originalPlay.length === 2) {
+        const pairs = getPairs(available, trumpSuit);
+        if (pairs.length > 0) pad = [...pairs[0]];
+        else pad = available.slice(0, 2);
+    }
+
+    return pad.slice(0, nPad);
+}
+
+// =========================================================================
+// game.js
+// =========================================================================
+
+/**
+ * game.js - 540打牌游戏状态与流程管理
+ *
+ * Translated from game_540/game.py (Python → ES module JS)
+ */
+
+// ---------------------------------------------------------------------------
+// 游戏阶段
+// ---------------------------------------------------------------------------
+
+/** @type {{ DEAL: string, CALL_TRUMP: string, PLAY: string, TRICK_END: string, GAME_END: string }} */
+const Phase = Object.freeze({
+    DEAL:       'deal',       // 发牌阶段
+    CALL_TRUMP: 'call_trump', // 叫主阶段
+    PLAY:       'play',       // 打牌阶段
+    TRICK_END:  'trick_end',  // 本轮结束（短暂显示）
+    GAME_END:   'game_end',   // 本局结束
+});
+
+// ---------------------------------------------------------------------------
+// 玩家
+// ---------------------------------------------------------------------------
+
+class Player {
+    /**
+     * @param {string}  name
+     * @param {boolean} [isHuman=false]
+     */
+    constructor(name, isHuman = false) {
+        this.name       = name;
+        this.isHuman    = isHuman;
+        /** @type {Card[]} */
+        this.hand       = [];
+        this.trickScore = 0;    // 本局得分
+        this.hasPlayed  = false; // 本局是否出过牌
+    }
+
+    /**
+     * Removes the given card objects from the hand (by reference).
+     * @param {Card[]} cards
+     */
+    removeCards(cards) {
+        for (const c of cards) {
+            const idx = this.hand.indexOf(c);
+            if (idx !== -1) this.hand.splice(idx, 1);
+        }
+    }
+
+    toString() {
+        return `Player(${this.name})`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 一轮（trick）记录
+// ---------------------------------------------------------------------------
+
+class TrickEntry {
+    /**
+     * @param {number} playerIdx
+     * @param {Card[]} cards
+     */
+    constructor(playerIdx, cards) {
+        this.playerIdx = playerIdx;
+        this.cards     = cards;
+    }
+
+    /** @returns {number} */
+    score() {
+        return totalScore(this.cards);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 游戏状态
+// ---------------------------------------------------------------------------
+
+class GameState {
+    constructor() {
+        /** @type {Player[]} */
+        this.players = [
+            new Player('玩家1', false), // AI  (index 0, left)
+            new Player('你',    true),  // 人类（index 1, bottom）
+            new Player('玩家2', false), // AI  (index 2, top)
+        ];
+
+        /** @type {string|null} */
+        this.trumpSuit       = null;  // 活主花色
+        this.trumpCaller     = -1;    // 叫主玩家索引
+        /** @type {Card[]} */
+        this.trumpCallCards  = [];    // 叫主用的牌
+        /** @type {TrickEntry[]} */
+        this.currentTrick    = [];    // 当前轮出牌记录
+        /** @type {string} */
+        this.phase           = Phase.DEAL;
+        this.firstPlayer     = 0;     // 本轮先出牌者
+        this.trickWinner     = -1;    // 本轮赢家
+        this.allTricksDone   = false;
+        this.message         = '';    // 界面提示信息
+        /** @type {string|null} */
+        this.pendingAction   = null;  // AI待执行动作
+
+        // 叫主阶段状态
+        this.callTrumpIdx    = 0;     // 当前正在决定是否叫主的玩家
+        this.callTrumpDone   = false;
+
+        // 打牌阶段：等待人类输入时置 true
+        this.waitingHuman    = false;
+        /** @type {Card[]|null} */
+        this.humanSelected   = null;  // 人类选择的牌（由UI填入）
+
+        // 被炸后垫牌状态
+        this.bombPadNeeded   = false;
+        this.bombPadPlayer   = -1;
+        this.bombPadCount    = 0;
+
+        // 初始化：发牌（随机决定叫主起始玩家）
+        this._deal(Math.floor(Math.random() * 3));
+    }
+
+    // ------------------------------------------------------------------
+    // 发牌
+    // ------------------------------------------------------------------
+
+    /**
+     * Deals a fresh game. Resets all per-game state.
+     * @param {number} [startFrom=-1]
+     */
+    _deal(startFrom = -1) {
+        if (startFrom < 0) startFrom = Math.floor(Math.random() * 3);
+
+        const deck  = buildDeck();
+        const hands = shuffleAndDeal(deck);
+
+        for (let i = 0; i < this.players.length; i++) {
+            this.players[i].hand       = [...hands[i]];
+            this.players[i].trickScore = 0;
+            this.players[i].hasPlayed  = false;
+        }
+
+        this.phase          = Phase.CALL_TRUMP;
+        this.callTrumpIdx   = startFrom;
+        this.callTrumpCount = 0;
+        this.trumpSuit      = null;
+        this.trumpCaller    = -1;
+        this.trumpCallCards = [];
+        this.callTrumpDone  = false;
+        this.currentTrick   = [];
+        this.trickWinner    = -1;
+        this.allTricksDone  = false;
+        this.message        = '叫主阶段：请各玩家决定是否叫主';
+    }
+
+    // ------------------------------------------------------------------
+    // 叫主阶段
+    // ------------------------------------------------------------------
+
+    /**
+     * Preemptive trump-calling: any player may call/counter at any time.
+     * @param {number}      playerIdx
+     * @param {Card[]|null} callCards
+     * @returns {boolean}
+     */
+    processCallTrump(playerIdx, callCards) {
+        if (callCards === null) return true;
+
+        if (this.trumpCaller === -1) {
+            if (canCallTrump(callCards)) {
+                this.trumpCaller    = playerIdx;
+                this.trumpCallCards = callCards;
+                this.trumpSuit      = this._extractTrumpSuit(callCards);
+                this.message        = `${this.players[playerIdx].name} 叫主`;
+                return true;
+            }
+            return false;
+        } else {
+            if (canCounterTrump(callCards, this.trumpCallCards)) {
+                this.trumpCaller    = playerIdx;
+                this.trumpCallCards = callCards;
+                this.trumpSuit      = this._extractTrumpSuit(callCards);
+                this.message        = `${this.players[playerIdx].name} 反主`;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Closes the trump-calling window and advances to the play phase.
+     */
+    finishCallTrump() {
+        this._finishCallTrump();
+    }
+
+    /**
+     * Extracts the active trump suit from calling cards.
+     * @param {Card[]} cards
+     * @returns {string|null}
+     */
+    _extractTrumpSuit(cards) {
+        for (const c of cards) {
+            if (c.suit !== 'special' && c.rank === '10') return c.suit;
+        }
+        return null;
+    }
+
+    /** @private */
+    _finishCallTrump() {
+        this.callTrumpDone = true;
+        this.phase         = Phase.PLAY;
+        this.firstPlayer   = Math.max(this.trumpCaller, 0);
+        this._startTrick(this.firstPlayer);
+
+        const suitCn = { spades: '黑桃', hearts: '红心', clubs: '梅花', diamonds: '方块' };
+        if (this.trumpSuit) {
+            const ts = suitCn[this.trumpSuit] ?? this.trumpSuit;
+            this.message = `活主：${ts}，${this.players[this.trumpCaller].name}先出牌`;
+        } else {
+            const firstName = this.players[this.firstPlayer].name;
+            this.message = `常主模式，${firstName}先出牌`;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 打牌阶段
+    // ------------------------------------------------------------------
+
+    /**
+     * Starts a new trick with the given first player.
+     * @param {number} firstPlayer
+     * @private
+     */
+    _startTrick(firstPlayer) {
+        this.currentTrick = [];
+        this.firstPlayer  = firstPlayer;
+        this.trickWinner  = -1;
+        this.message      = `${this.players[firstPlayer].name} 先出牌`;
+    }
+
+    /**
+     * Returns the index of the player who should play next this trick.
+     * @returns {number}
+     */
+    whoLeads() {
+        if (this.currentTrick.length === 0) return this.firstPlayer;
+
+        const played = new Set(this.currentTrick.map(e => e.playerIdx));
+        for (let offset = 1; offset <= 2; offset++) {
+            const idx = (this.firstPlayer + offset) % 3;
+            if (!played.has(idx)) return idx;
+        }
+        return -1;
+    }
+
+    /** @returns {boolean} */
+    isTrickComplete() {
+        return this.currentTrick.length === 3;
+    }
+
+    /** @returns {boolean} */
+    trickHasScore() {
+        return this.currentTrick.some(e => e.score() > 0);
+    }
+
+    /**
+     * Returns the currently winning cards in this trick, or null if no cards played.
+     * @returns {Card[]|null}
+     */
+    getCurrentBest() {
+        if (this.currentTrick.length === 0) return null;
+        let bestEntry = this.currentTrick[0];
+        for (const entry of this.currentTrick.slice(1)) {
+            if (doesBeat(entry.cards, bestEntry.cards, this.trumpSuit)) {
+                bestEntry = entry;
+            }
+        }
+        return bestEntry.cards;
+    }
+
+    /**
+     * Returns the cards that were led (first played) this trick, or null.
+     * @returns {Card[]|null}
+     */
+    getLedCards() {
+        if (this.currentTrick.length > 0) return this.currentTrick[0].cards;
+        return null;
+    }
+
+    /**
+     * Attempts to play cards for a player.
+     * @param {number}   playerIdx
+     * @param {Card[]}   cards
+     * @param {boolean}  [skipValidation=false]
+     * @returns {[boolean, string]}
+     */
+    playCards(playerIdx, cards, skipValidation = false) {
+        const player = this.players[playerIdx];
+
+        for (const c of cards) {
+            if (!player.hand.includes(c)) return [false, `手中没有这张牌: ${c}`];
+        }
+
+        // Leading (first card of the trick)
+        if (this.currentTrick.length === 0) {
+            const playType = getPlayType(cards, this.trumpSuit);
+            if (playType === PlayType.INVALID) return [false, '无效出牌'];
+
+            const anyUnplayed = this.players.some(
+                (p, i) => i !== playerIdx && !p.hasPlayed
+            );
+            if (anyUnplayed && !skipValidation) {
+                const pairs = getPairs(player.hand, this.trumpSuit);
+                if (pairs.length > 0) {
+                    const pairTypes = [
+                        PlayType.PAIR, PlayType.CONSEC_PAIRS,
+                        PlayType.TRIPLE, PlayType.CONSEC_TRIPLES,
+                        PlayType.BOMB,
+                    ];
+                    if (!pairTypes.includes(playType)) {
+                        return [false, '有玩家未出过牌，必须出对子（或连对等）'];
+                    }
+                } else {
+                    if (playType !== PlayType.SINGLE) return [false, '无对子时必须出单张'];
+                    const best = player.hand.reduce((b, c) =>
+                        cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
+                    );
+                    if (cards[0] !== best) return [false, `必须出最大单张: ${best}`];
+                }
+            }
+
+            cards.forEach((c, i) => { c.playOrder = i; });
+
+            this.currentTrick.push(new TrickEntry(playerIdx, cards));
+            player.removeCards(cards);
+            player.hasPlayed = true;
+            return [true, ''];
+
+        } else {
+            // Following
+            const ledCards    = this.getLedCards();
+            const currentBest = this.getCurrentBest();
+            const hasScore    = this.trickHasScore();
+
+            if (!skipValidation) {
+                const [ok, err] = validateFollow(
+                    cards, ledCards, player.hand,
+                    this.trumpSuit, hasScore, currentBest ?? []
+                );
+                if (!ok) return [false, err];
+            }
+
+            cards.forEach((c, i) => { c.playOrder = this.currentTrick.length * 10 + i; });
+
+            this.currentTrick.push(new TrickEntry(playerIdx, cards));
+            player.removeCards(cards);
+            player.hasPlayed = true;
+            return [true, ''];
+        }
+    }
+
+    /**
+     * Resolves the current trick: determines the winner and awards score.
+     * @returns {number}
+     */
+    resolveTrick() {
+        if (!this.isTrickComplete()) return -1;
+
+        let bestEntry = this.currentTrick[0];
+        for (const entry of this.currentTrick.slice(1)) {
+            if (doesBeat(entry.cards, bestEntry.cards, this.trumpSuit)) {
+                bestEntry = entry;
+            }
+        }
+
+        const winner     = bestEntry.playerIdx;
+        const trickScore = this.currentTrick.reduce((sum, e) => sum + e.score(), 0);
+        this.players[winner].trickScore += trickScore;
+        this.trickWinner = winner;
+
+        return winner;
+    }
+
+    /**
+     * Clears the current trick and starts a new one led by the previous winner.
+     */
+    startNextTrick() {
+        const winner      = this.trickWinner;
+        this.currentTrick = [];
+        this._startTrick(winner);
+
+        if (this.players.every(p => p.hand.length === 0)) {
+            this.allTricksDone = true;
+            this.phase         = Phase.GAME_END;
+        }
+    }
+
+    /**
+     * Returns the delta score for each player relative to the 180-point baseline.
+     * @returns {number[]} [delta0, delta1, delta2]
+     */
+    calculateFinalScores() {
+        const baseline = 180;
+        return this.players.map(p => p.trickScore - baseline);
+    }
+
+    /**
+     * Resets the game (re-deals).
+     */
+    reset() {
+        let startFrom;
+        if (this.allTricksDone) {
+            startFrom = this.players.reduce(
+                (bestIdx, p, i) => p.trickScore > this.players[bestIdx].trickScore ? i : bestIdx,
+                0
+            );
+        } else {
+            startFrom = Math.floor(Math.random() * 3);
+        }
+        this._deal(startFrom);
+    }
+}
+
+// =========================================================================
+// ai.js
+// =========================================================================
+
+/**
+ * ai.js - 540打牌游戏 AI 决策模块（规则based）
+ *
+ * Translated from game_540/ai.py (Python → ES module JS)
+ */
+
+// ---------------------------------------------------------------------------
+// 叫主 AI
+// ---------------------------------------------------------------------------
+
+/**
+ * AI决定是否叫主/反主。
+ * @param {Card[]} hand
+ * @param {Card[]|null} currentCall
+ * @returns {Card[]|null}
+ */
+function aiDecideCallTrump(hand, currentCall) {
+    const candidates = _findCallCandidates(hand);
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => {
+        const lenDiff = b.length - a.length;
+        if (lenDiff !== 0) return lenDiff;
+        return _callPower(b) - _callPower(a);
+    });
+
+    for (const callCards of candidates) {
+        if (currentCall === null || currentCall === undefined) {
+            if (canCallTrump(callCards)) return callCards;
+        } else {
+            if (canCounterTrump(callCards, currentCall)) return callCards;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 找出所有可以用于叫主的牌组合
+ * @param {Card[]} hand
+ * @returns {Card[][]}
+ */
+function _findCallCandidates(hand) {
+    const candidates = [];
+    const groups = {};
+    for (const c of hand) {
+        if (!groups[c.rank]) groups[c.rank] = [];
+        groups[c.rank].push(c);
+    }
+
+    for (const [rank, cards] of Object.entries(groups)) {
+        if (rank === '10' && cards.length >= 1) {
+            candidates.push([cards[0]]);
+        }
+        if ([`10`, RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(rank)) {
+            if (cards.length >= 2) candidates.push(cards.slice(0, 2));
+            if (cards.length >= 3) candidates.push(cards.slice(0, 3));
+            if (cards.length >= 4) candidates.push(cards.slice(0, 4));
+        }
+    }
+
+    return candidates;
+}
+
+/**
+ * 叫主强度（排序用）
+ * @param {Card[]} cards
+ * @returns {number}
+ */
+function _callPower(cards) {
+    const rank = cards[0].rank;
+    const rankPower = {
+        '10': 1,
+        [RANK_SMALL_JOKER]: 2,
+        [RANK_BIG_JOKER]: 3,
+        [RANK_CHARACTER]: 4,
+        [RANK_THREE]: 5,
+    };
+    return rankPower[rank] ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// 出牌 AI（领出）
+// ---------------------------------------------------------------------------
+
+/**
+ * AI领出牌决策。
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @param {boolean} anyUnplayed
+ * @returns {Card[]}
+ */
+function aiLead(hand, trumpSuit, anyUnplayed) {
+    if (anyUnplayed) {
+        const pairs = getPairs(hand, trumpSuit);
+        if (pairs.length) {
+            const nonTrumpScorePairs = pairs.filter(
+                p => !isTrump(p[0], trumpSuit) && p[0].scoreValue() > 0
+            );
+            if (nonTrumpScorePairs.length) {
+                const best = nonTrumpScorePairs.reduce((a, b) =>
+                    cardPower(a[0], trumpSuit) > cardPower(b[0], trumpSuit) ? a : b
+                );
+                return [...best];
+            }
+            const best = pairs.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+            );
+            return [...best];
+        } else {
+            return [hand.reduce((a, b) =>
+                cardPower(a, trumpSuit) > cardPower(b, trumpSuit) ? a : b
+            )];
+        }
+    }
+
+    const consec = _findBestConsecutivePairs(hand, trumpSuit);
+    if (consec) return consec;
+
+    const pairs = getPairs(hand, trumpSuit);
+    if (pairs.length) {
+        const scoredPairs = pairs.filter(p => p[0].scoreValue() > 0 || p[1].scoreValue() > 0);
+        let best;
+        if (scoredPairs.length) {
+            best = scoredPairs.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) > cardPower(b[0], trumpSuit) ? a : b
+            );
+        } else {
+            best = pairs.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) > cardPower(b[0], trumpSuit) ? a : b
+            );
+        }
+        return [...best];
+    }
+
+    const nonScore = hand.filter(c => c.scoreValue() === 0);
+    if (nonScore.length) {
+        return [nonScore.reduce((a, b) =>
+            cardPower(a, trumpSuit) > cardPower(b, trumpSuit) ? a : b
+        )];
+    }
+    return [hand.reduce((a, b) =>
+        cardPower(a, trumpSuit) > cardPower(b, trumpSuit) ? a : b
+    )];
+}
+
+/**
+ * 寻找手牌中最长的连对
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Card[]|null}
+ */
+function _findBestConsecutivePairs(hand, trumpSuit) {
+    const groups = {};
+    for (const c of hand) {
+        const key = pairKey(c, trumpSuit);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(c);
+    }
+
+    const pairGroups = Object.entries(groups).filter(([k, g]) => g.length >= 2);
+    if (pairGroups.length < 2) return null;
+
+    const pairWithOrder = [];
+    for (const [k, g] of pairGroups) {
+        const order = trumpPairOrder([g[0], g[1]], trumpSuit);
+        if (order > 0) {
+            pairWithOrder.push([order, g.slice(0, 2)]);
+        }
+    }
+
+    if (!pairWithOrder.length) return null;
+
+    pairWithOrder.sort((a, b) => a[0] - b[0]);
+
+    let bestSeq = [];
+    let currentSeq = [pairWithOrder[0]];
+    for (let i = 1; i < pairWithOrder.length; i++) {
+        if (pairWithOrder[i][0] - pairWithOrder[i - 1][0] === 1) {
+            currentSeq.push(pairWithOrder[i]);
+        } else {
+            if (currentSeq.length > bestSeq.length) bestSeq = currentSeq;
+            currentSeq = [pairWithOrder[i]];
+        }
+    }
+    if (currentSeq.length > bestSeq.length) bestSeq = currentSeq;
+
+    if (bestSeq.length >= 2) {
+        const result = [];
+        for (const [, pair] of bestSeq) result.push(...pair);
+        return result;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// 跟牌 AI
+// ---------------------------------------------------------------------------
+
+/**
+ * AI跟牌决策。
+ * @param {Card[]} hand
+ * @param {Card[]} ledCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @returns {Card[]}
+ */
+function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
+    const n = ledCards.length;
+    const ledSuit = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+
+    const available = handInSuit.length ? handInSuit : hand;
+
+    const playType = getPlayType(ledCards, trumpSuit);
+
+    if (playType === PlayType.PAIR || playType === PlayType.CONSEC_PAIRS) {
+        return _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n);
+    }
+
+    if (playType === PlayType.TRIPLE) {
+        return _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 3);
+    }
+
+    if (playType === PlayType.BOMB) {
+        const bombs = getBombs(hand, trumpSuit);
+        if (bombs.length) {
+            const sortedBombs = [...bombs].sort((a, b) =>
+                cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)
+            );
+            for (const bomb of sortedBombs) {
+                if (doesBeat(bomb, currentBest, trumpSuit)) return bomb;
+            }
+        }
+        return _pickDiscard(hand, 4, trumpSuit);
+    }
+
+    return _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore);
+}
+
+/**
+ * 跟单张牌
+ */
+function _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
+    const ledSuit = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+
+    if (handInSuit.length) {
+        if (trickHasScore) {
+            const canBeatCards = handInSuit.filter(c => doesBeat([c], currentBest, trumpSuit));
+            if (canBeatCards.length) {
+                return [canBeatCards.reduce((a, b) =>
+                    cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b
+                )];
+            }
+        }
+        return [_pickSmallestCard(handInSuit, trumpSuit)];
+    } else {
+        if (trickHasScore) {
+            const trumpInHand = hand.filter(c => isTrump(c, trumpSuit));
+            const canBeat = trumpInHand.filter(c => doesBeat([c], currentBest, trumpSuit));
+            if (canBeat.length) {
+                return [canBeat.reduce((a, b) =>
+                    cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b
+                )];
+            }
+        }
+        return [_pickSmallestCard(hand, trumpSuit)];
+    }
+}
+
+/**
+ * 跟对子/连对
+ */
+function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) {
+    const ledSuit = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    const pairsInSuit = getPairs(handInSuit, trumpSuit);
+
+    const numPairsNeeded = Math.floor(n / 2);
+
+    if (pairsInSuit.length >= numPairsNeeded) {
+        if (trickHasScore) {
+            const canBeat = pairsInSuit.filter(p =>
+                doesBeat([...p], currentBest.slice(0, 2), trumpSuit)
+            );
+            if (canBeat.length) {
+                const bestPair = canBeat.reduce((a, b) =>
+                    cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+                );
+                return [...bestPair];
+            }
+        }
+        const smallest = pairsInSuit.reduce((a, b) =>
+            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+        );
+        return [...smallest];
+    } else {
+        const result = [];
+        const usedCards = new Set();
+        for (const pair of pairsInSuit) {
+            result.push(...pair);
+            for (const c of pair) usedCards.add(c);
+        }
+        const remainingNeeded = n - result.length;
+        const fillers = (handInSuit.length ? handInSuit : hand)
+            .filter(c => !usedCards.has(c))
+            .slice(0, remainingNeeded);
+        result.push(...fillers);
+        if (result.length < n) {
+            const more = hand
+                .filter(c => !result.includes(c))
+                .slice(0, n - result.length);
+            result.push(...more);
+        }
+        return result.slice(0, n);
+    }
+}
+
+/**
+ * 跟3同张
+ */
+function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, sameCount) {
+    const ledSuit = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    const triples = getTriples(handInSuit, trumpSuit);
+
+    if (triples.length) {
+        if (trickHasScore) {
+            const canBeat = triples.filter(t => doesBeat(t, currentBest, trumpSuit));
+            if (canBeat.length) {
+                return canBeat.reduce((a, b) =>
+                    cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+                );
+            }
+        }
+        return triples.reduce((a, b) =>
+            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+        );
+    }
+
+    return _pickDiscard(handInSuit.length ? handInSuit : hand, n, trumpSuit);
+}
+
+/**
+ * 选最小的牌（优先非分牌）
+ */
+function _pickSmallestCard(cards, trumpSuit) {
+    const nonScore = cards.filter(c => c.scoreValue() === 0);
+    const pool = nonScore.length ? nonScore : cards;
+    return pool.reduce((a, b) =>
+        cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b
+    );
+}
+
+/**
+ * 选n张垫牌（不能主动垫分牌）。
+ */
+function _pickDiscard(hand, n, trumpSuit) {
+    const nonScore = [...hand]
+        .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)))
+        .filter(c => c.scoreValue() === 0)
+        .slice(0, n);
+
+    const result = nonScore;
+    if (result.length < n) {
+        const scoreCards = hand
+            .filter(c => c.scoreValue() > 0)
+            .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)));
+        result.push(...scoreCards.slice(0, n - result.length));
+    }
+    return result.slice(0, n);
+}
+
+// =========================================================================
+// renderer.js
+// =========================================================================
+
+/**
+ * renderer.js - 540打牌游戏 Canvas 渲染引擎
+ *
+ * Translated from game_540/ui.py (pygame → HTML5 Canvas 2D)
+ */
+
+// ---------------------------------------------------------------------------
+// Color constants
+// ---------------------------------------------------------------------------
+const C_BG        = '#226e22';
+const C_CARD_BG   = '#fffdf0';
+const C_CARD_BACK = '#194696';
+const C_CARD_SEL  = '#ffdc32';
+const C_RED       = '#d21e1e';
+const C_BLACK     = '#141414';
+const C_GOLD      = '#be9614';
+const C_PURPLE    = '#6e1ea0';
+const C_WHITE     = '#ffffff';
+const C_GRAY      = '#969696';
+const C_DARK_GRAY = '#505050';
+const C_PANEL_BG  = '#123712';
+const C_BTN_GREEN = '#28a028';
+const C_BTN_RED   = '#b42828';
+const C_BTN_GRAY  = '#646464';
+const C_HIGHLIGHT = '#ffff64';
+
+const SUIT_COLOR_MAP = {
+    [SUIT_SPADES]:   C_BLACK,
+    [SUIT_CLUBS]:    C_BLACK,
+    [SUIT_HEARTS]:   C_RED,
+    [SUIT_DIAMONDS]: C_RED,
+    [SUIT_SPECIAL]:  C_PURPLE,
+};
+
+const SUIT_SYMBOL = {
+    [SUIT_SPADES]:   '\u2660',
+    [SUIT_HEARTS]:   '\u2665',
+    [SUIT_CLUBS]:    '\u2663',
+    [SUIT_DIAMONDS]: '\u2666',
+    [SUIT_SPECIAL]:  '',
+};
+
+const SUIT_DISPLAY_NAME = {
+    [SUIT_SPADES]:   '黑桃',
+    [SUIT_HEARTS]:   '红心',
+    [SUIT_CLUBS]:    '梅花',
+    [SUIT_DIAMONDS]: '方块',
+    null:            '常主',
+};
+
+const FONT_STACK = '"Noto Sans SC", "Microsoft YaHei", "SimHei", sans-serif';
+
+// ---------------------------------------------------------------------------
+// Helper: card Chinese name (for log messages)
+// ---------------------------------------------------------------------------
+function cardCn(card) {
+    if (card.suit === SUIT_SPECIAL ||
+        ['small_joker', 'big_joker', 'character'].includes(card.rank)) {
+        return RANK_DISPLAY[card.rank] ?? card.rank;
+    }
+    const suitCn = { spades: '黑桃', hearts: '红心', clubs: '梅花', diamonds: '方块' };
+    return `${suitCn[card.suit] ?? card.suit}${RANK_DISPLAY[card.rank] ?? card.rank}`;
+}
+
+function cardsCn(cards) {
+    return cards.map(cardCn).join(' ');
+}
+
+// ---------------------------------------------------------------------------
+// GameRenderer
+// ---------------------------------------------------------------------------
+class GameRenderer {
+    /**
+     * @param {HTMLCanvasElement} canvas
+     * @param {GameState} game
+     */
+    constructor(canvas, game) {
+        this.canvas = canvas;
+        this.ctx    = canvas.getContext('2d');
+        this.game   = game;
+
+        /** @type {number[]} */
+        this.selectedIndices  = [];
+        /** @type {{x:number,y:number,w:number,h:number}[]} */
+        this.humanHandRects   = [];
+        /** @type {string[]} */
+        this.messageLog       = [];
+        this.showingTrickResult = false;
+        this.lastTrickDisplay   = 0;
+
+        this.aiPending    = false;
+        this.aiActionTime = 0;
+        this.aiDelay      = 900; // ms
+
+        /** @type {Card[]} */
+        this.playedCards  = [];
+        this.showTracker  = false;
+
+        this.dealStartTime = Date.now();
+        this.DEAL_DURATION = 7000;  // ms
+        this.DEAL_TOTAL    = 42;
+        this.CALL_WINDOW   = 8000;  // ms
+
+        /** @type {Object|null} */
+        this._aiCallTimes = null;
+
+        /** @type {Object<string,{x:number,y:number,w:number,h:number}>} */
+        this._buttonRects = {};
+        /** @type {{x:number,y:number,w:number,h:number}|null} */
+        this._restartBtnRect = null;
+
+        this._sortHumanHand();
+    }
+
+    // ------------------------------------------------------------------
+    // Layout (responsive, called every frame)
+    // ------------------------------------------------------------------
+    _layout() {
+        const W = this.canvas.width;
+        const H = this.canvas.height;
+        const cardW = Math.max(36, Math.min(W * 0.042, 68));
+        const cardH = cardW * 1.47;
+        const pad   = 6;
+
+        const leftW  = Math.round(W * 0.07);
+        const rightW = Math.round(W * 0.20);
+        const topH   = Math.round(H * 0.13);
+        const botH   = Math.round(H * 0.25);
+
+        const centerW = W - leftW - rightW - 3 * pad;
+        const centerH = H - topH  - botH  - 3 * pad;
+
+        return {
+            W, H, cardW, cardH, pad,
+            top:    { x: pad,                     y: pad,                  w: W - 2 * pad,  h: topH },
+            left:   { x: pad,                     y: topH + 2 * pad,      w: leftW,         h: centerH },
+            center: { x: leftW + 2 * pad,         y: topH + 2 * pad,      w: centerW,       h: centerH },
+            right:  { x: leftW + centerW + 3 * pad, y: topH + 2 * pad,    w: rightW,        h: centerH },
+            bottom: { x: pad,                     y: topH + centerH + 3 * pad, w: W - 2 * pad, h: botH },
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Text helper
+    // ------------------------------------------------------------------
+    _fillText(text, x, y, options = {}) {
+        const ctx  = this.ctx;
+        const size  = options.size  || 16;
+        const color = options.color || C_WHITE;
+        const bold  = options.bold  ? 'bold ' : '';
+        const font  = options.font  || FONT_STACK;
+        ctx.font      = `${bold}${size}px ${font}`;
+        ctx.fillStyle = color;
+        ctx.textBaseline = 'top';
+        if (options.center) {
+            ctx.textAlign = 'center';
+            ctx.fillText(text, x, y);
+            ctx.textAlign = 'start';
+        } else {
+            ctx.textAlign = 'start';
+            ctx.fillText(text, x, y);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rounded rect path helper
+    // ------------------------------------------------------------------
+    _roundRect(x, y, w, h, r) {
+        const ctx = this.ctx;
+        r = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    // ------------------------------------------------------------------
+    // Card back
+    // ------------------------------------------------------------------
+    drawCardBack(x, y, w, h) {
+        const ctx = this.ctx;
+        this._roundRect(x, y, w, h, 6);
+        ctx.fillStyle = C_CARD_BACK;
+        ctx.fill();
+        ctx.strokeStyle = '#b4c8f0';
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+        const m = Math.round(w * 0.06);
+        this._roundRect(x + m, y + m, w - 2 * m, h - 2 * m, 4);
+        ctx.fillStyle = '#285aaa';
+        ctx.fill();
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+        const dd = Math.round(w * 0.21);
+        for (const [dx, dy] of [[0, -dd], [dd, 0], [0, dd], [-dd, 0]]) {
+            ctx.beginPath();
+            ctx.arc(cx + dx, cy + dy, Math.max(2, w * 0.045), 0, Math.PI * 2);
+            ctx.fillStyle = '#3c6ebe';
+            ctx.fill();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Joker card face
+    // ------------------------------------------------------------------
+    drawJoker(x, y, w, h, isBig) {
+        const ctx = this.ctx;
+        const cx  = x + w / 2;
+        const cy  = y + h / 2;
+        const s   = w / 68;
+
+        let bg, fg, accent, label;
+        if (isBig) {
+            bg = '#dc1e1e'; fg = C_WHITE; accent = '#ffc800'; label = '大王';
+        } else {
+            bg = '#1e1e32'; fg = C_WHITE; accent = '#b4b4c8'; label = '小王';
+        }
+
+        this._roundRect(x, y, w, h, 6);
+        ctx.fillStyle = bg;
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+
+        const crownCx = cx;
+        const crownCy = cy - 14 * s;
+        const crownW  = 28 * s;
+        const crownH  = 18 * s;
+        const pts = [
+            [crownCx - crownW,     crownCy + crownH],
+            [crownCx - crownW,     crownCy],
+            [crownCx - crownW / 2, crownCy - crownH / 2],
+            [crownCx,              crownCy + crownH / 4],
+            [crownCx + crownW / 2, crownCy - crownH / 2],
+            [crownCx + crownW,     crownCy],
+            [crownCx + crownW,     crownCy + crownH],
+        ];
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+        ctx.closePath();
+        ctx.fillStyle = accent;
+        ctx.fill();
+        ctx.strokeStyle = fg;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+
+        const jewels = [
+            [crownCx - crownW, crownCy],
+            [crownCx,          crownCy + crownH / 4],
+            [crownCx + crownW, crownCy],
+        ];
+        for (const [jx, jy] of jewels) {
+            ctx.beginPath();
+            ctx.arc(jx, jy, Math.max(2, 3 * s), 0, Math.PI * 2);
+            ctx.fillStyle = fg;
+            ctx.fill();
+        }
+
+        this._fillText('JOKER', cx, cy + 16 * s, {
+            size: Math.round(14 * s), color: fg, center: true,
+            font: '"Segoe UI", Arial, sans-serif',
+        });
+
+        this._fillText(label, x + 3 * s, y + 3 * s, {
+            size: Math.round(13 * s), color: fg, bold: true,
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Special plain card (字牌 / 3)
+    // ------------------------------------------------------------------
+    drawSpecialPlain(x, y, w, h, rank) {
+        const ctx = this.ctx;
+        const cx  = x + w / 2;
+        const cy  = y + h / 2;
+        const s   = w / 68;
+
+        let bgColor, centerText, cornerText;
+        if (rank === '3') {
+            bgColor = '#f0e6ff'; centerText = '3'; cornerText = '3';
+        } else {
+            bgColor = '#e6dcff'; centerText = '字牌'; cornerText = '字';
+        }
+
+        this._roundRect(x, y, w, h, 6);
+        ctx.fillStyle = bgColor;
+        ctx.fill();
+        ctx.strokeStyle = C_PURPLE;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+
+        this._fillText(centerText, cx, cy - 10 * s, {
+            size: Math.round(20 * s), color: C_PURPLE, bold: true, center: true,
+        });
+
+        this._fillText(cornerText, x + 3 * s, y + 3 * s, {
+            size: Math.round(14 * s), color: C_PURPLE, bold: true,
+        });
+
+        if (rank !== '3') {
+            this._fillText('牌', x + 3 * s, y + 3 * s + 16 * s, {
+                size: Math.round(14 * s), color: C_PURPLE, bold: true,
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Main card drawing dispatcher
+    // ------------------------------------------------------------------
+    drawCard(card, x, y, w, h, faceUp = true, selected = false, highlightCall = false) {
+        const ctx = this.ctx;
+
+        if (!faceUp || card === null) {
+            this.drawCardBack(x, y, w, h);
+            return { x, y, w, h };
+        }
+
+        const rank = card.rank;
+        const suit = card.suit;
+
+        if (suit === SUIT_SPECIAL) {
+            if (rank === 'big_joker') {
+                this.drawJoker(x, y, w, h, true);
+            } else if (rank === 'small_joker') {
+                this.drawJoker(x, y, w, h, false);
+            } else {
+                this.drawSpecialPlain(x, y, w, h, rank);
+            }
+            if (selected) {
+                this._roundRect(x, y, w, h, 6);
+                ctx.strokeStyle = C_CARD_SEL;
+                ctx.lineWidth   = 4;
+                ctx.stroke();
+            }
+            return { x, y, w, h };
+        }
+
+        const color    = SUIT_COLOR_MAP[suit] || C_BLACK;
+        const sym      = SUIT_SYMBOL[suit]    || '';
+        const rankStr  = RANK_DISPLAY[rank]   || rank;
+        const s        = w / 68;
+
+        let bg;
+        if (selected) {
+            bg = C_CARD_SEL;
+        } else if (highlightCall) {
+            bg = '#ffeb96';
+        } else {
+            bg = C_CARD_BG;
+        }
+
+        this._roundRect(x, y, w, h, 6);
+        ctx.fillStyle = bg;
+        ctx.fill();
+
+        const bw = selected ? 3 : 1;
+        const bc = selected ? '#c89600' : C_DARK_GRAY;
+        ctx.strokeStyle = bc;
+        ctx.lineWidth   = bw;
+        ctx.stroke();
+
+        const rankFontSize = Math.round(15 * s);
+        const suitFontSize = Math.round(18 * s);
+        this._fillText(rankStr, x + 4 * s, y + 3 * s, {
+            size: rankFontSize, color, bold: true,
+        });
+        this._fillText(sym, x + 4 * s, y + 3 * s + rankFontSize + 1, {
+            size: suitFontSize, color,
+        });
+
+        const cSuitSize = Math.round(38 * s);
+        const cRankSize = Math.round(22 * s);
+        this._fillText(sym, x + w / 2, y + h / 2 - 14 * s - cSuitSize / 2, {
+            size: cSuitSize, color, center: true,
+        });
+        this._fillText(rankStr, x + w / 2, y + h / 2 + 10 * s, {
+            size: cRankSize, color, bold: true, center: true,
+        });
+
+        return { x, y, w, h };
+    }
+
+    // ------------------------------------------------------------------
+    // Hand drawing: horizontal
+    // ------------------------------------------------------------------
+    drawHandHorizontal(cards, areaX, areaY, areaW, options = {}) {
+        const {
+            faceUp = true,
+            selectedIndices = null,
+            callableIndices = null,
+            cardH = null,
+        } = options;
+
+        const layout = this._layout();
+        const cw = layout.cardW;
+        const ch = cardH || layout.cardH;
+        const margin = 5;
+
+        const n = cards.length;
+        if (n === 0) return [];
+
+        const totalNatural = n * cw + (n - 1) * margin;
+        let step;
+        if (totalNatural <= areaW) {
+            step = cw + margin;
+        } else {
+            step = Math.max(Math.round(cw * 0.26), Math.round((areaW - cw) / Math.max(n - 1, 1)));
+        }
+
+        const actualW = cw + (n - 1) * step;
+        const startX  = areaX + Math.round((areaW - actualW) / 2);
+
+        const selOffset = Math.round(16 * ch / 100);
+        const rects = [];
+        for (let i = 0; i < n; i++) {
+            const sel = selectedIndices !== null && selectedIndices.includes(i);
+            const hl  = callableIndices !== null && callableIndices.includes(i);
+            const cy  = areaY - (sel ? selOffset : 0);
+            const r   = this.drawCard(cards[i], startX + i * step, cy, cw, ch,
+                                       faceUp, sel, hl);
+            rects.push(r);
+        }
+        return rects;
+    }
+
+    // ------------------------------------------------------------------
+    // Hand drawing: vertical
+    // ------------------------------------------------------------------
+    drawHandVertical(cards, areaX, areaY, areaH) {
+        const n = cards.length;
+        if (n === 0) return [];
+
+        const layout = this._layout();
+        const cw = Math.round(layout.cardW * 0.6);
+        const ch = Math.round(layout.cardH * 0.6);
+        const step = Math.max(Math.round(ch * 0.18),
+            Math.round((areaH - ch) / Math.max(n - 1, 1)));
+        const startY = areaY + Math.round((areaH - ch - (n - 1) * step) / 2);
+
+        for (let i = 0; i < n; i++) {
+            this.drawCardBack(areaX, startY + i * step, cw, ch);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Button
+    // ------------------------------------------------------------------
+    drawButton(text, x, y, w, h, color = C_BTN_GREEN, enabled = true) {
+        const ctx = this.ctx;
+        const col = enabled ? color : C_BTN_GRAY;
+
+        this._roundRect(x, y, w, h, 7);
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.strokeStyle = C_WHITE;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+
+        const fontSize = Math.round(Math.min(h * 0.45, w * 0.16));
+        this._fillText(text, x + w / 2, y + (h - fontSize) / 2, {
+            size: fontSize, color: C_WHITE, bold: true, center: true,
+        });
+
+        return { x, y, w, h };
+    }
+
+    // ------------------------------------------------------------------
+    // Panel
+    // ------------------------------------------------------------------
+    drawPanel(area) {
+        const ctx = this.ctx;
+        this._roundRect(area.x, area.y, area.w, area.h, 8);
+        ctx.fillStyle = C_PANEL_BG;
+        ctx.fill();
+        ctx.strokeStyle = C_GRAY;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+    }
+
+    // ------------------------------------------------------------------
+    // Score panel
+    // ------------------------------------------------------------------
+    drawScorePanel(area, game) {
+        const ctx = this.ctx;
+        let x = area.x + 12;
+        let y = area.y + 10;
+
+        this._fillText('得分', area.x + area.w / 2, y + 2, {
+            size: 20, color: C_GOLD, bold: true, center: true,
+        });
+        y += 36;
+
+        for (const p of game.players) {
+            const name = p.isHuman ? '你' : p.name;
+            this._fillText(name, x, y, { size: 17, color: C_WHITE, bold: true });
+
+            const scCol = p.trickScore >= 180 ? '#50dc50' : '#dc6450';
+            this._fillText(`${p.trickScore}分`, area.x + area.w - 70, y, {
+                size: 17, color: scCol, bold: true,
+            });
+            y += 22;
+
+            const barW = area.w - 24;
+            this._roundRect(x, y, barW, 10, 4);
+            ctx.fillStyle = C_DARK_GRAY;
+            ctx.fill();
+
+            const fill = Math.round(barW * Math.min(p.trickScore, 360) / 360);
+            const barCol = p.trickScore >= 180 ? C_BTN_GREEN : C_BTN_RED;
+            if (fill > 0) {
+                this._roundRect(x, y, fill, 10, 4);
+                ctx.fillStyle = barCol;
+                ctx.fill();
+            }
+
+            const baseX = x + Math.round(barW * 180 / 360);
+            ctx.beginPath();
+            ctx.moveTo(baseX, y - 2);
+            ctx.lineTo(baseX, y + 12);
+            ctx.strokeStyle = C_HIGHLIGHT;
+            ctx.lineWidth   = 2;
+            ctx.stroke();
+
+            y += 20;
+        }
+
+        y += 8;
+        ctx.beginPath();
+        ctx.moveTo(area.x + 5, y);
+        ctx.lineTo(area.x + area.w - 5, y);
+        ctx.strokeStyle = C_GRAY;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+        y += 10;
+
+        this._fillText('基准线: 180分', x, y, { size: 14, color: C_GRAY });
+        y += 20;
+        this._fillText('总分: 540分', x, y, { size: 14, color: C_GRAY });
+        y += 24;
+
+        if (game.trumpCaller >= 0) {
+            const cname = game.players[game.trumpCaller].name;
+            this._fillText(`叫主: ${cname}`, x, y, { size: 15, color: C_GOLD });
+            y += 20;
+            if (game.trumpSuit) {
+                const ts = SUIT_DISPLAY_NAME[game.trumpSuit] || '';
+                this._fillText(`花色: ${ts}`, x, y, { size: 15, color: C_GOLD });
+            } else {
+                this._fillText('常主', x, y, { size: 15, color: C_GOLD });
+            }
+            y += 20;
+        }
+
+        y = area.y + area.h - 110;
+        for (const p of game.players) {
+            const name = p.isHuman ? '你' : p.name;
+            this._fillText(`${name}: ${p.hand.length}张`, x, y, { size: 14, color: C_GRAY });
+            y += 18;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Message log
+    // ------------------------------------------------------------------
+    drawMessages(area, messages) {
+        const msgs = messages.slice(-8);
+        const x = area.x + 10;
+        let y = area.y + area.h - 30 - msgs.length * 17;
+        this._fillText('日志', x, y - 18, { size: 13, color: C_GOLD, bold: true });
+        for (const msg of msgs) {
+            this._fillText(msg, x, y, { size: 13, color: C_WHITE });
+            y += 17;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Game end overlay
+    // ------------------------------------------------------------------
+    drawGameEnd(game) {
+        const ctx = this.ctx;
+        const W = this.canvas.width;
+        const H = this.canvas.height;
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.67)';
+        ctx.fillRect(0, 0, W, H);
+
+        const bw = Math.min(660, W * 0.7);
+        const bh = Math.min(420, H * 0.55);
+        const bx = (W - bw) / 2;
+        const by = (H - bh) / 2;
+
+        this._roundRect(bx, by, bw, bh, 18);
+        ctx.fillStyle = C_PANEL_BG;
+        ctx.fill();
+        ctx.strokeStyle = C_GOLD;
+        ctx.lineWidth   = 3;
+        ctx.stroke();
+
+        const cx = bx + bw / 2;
+        this._fillText('本局结束', cx, by + 24, {
+            size: 34, color: C_GOLD, bold: true, center: true,
+        });
+
+        const deltas = game.calculateFinalScores();
+        let y = by + 90;
+        for (let i = 0; i < game.players.length; i++) {
+            const p     = game.players[i];
+            const delta = deltas[i];
+            const name  = p.isHuman ? '你' : p.name;
+            const col   = delta >= 0 ? '#50dc50' : '#e65050';
+            const sign  = delta >= 0 ? '+' : '';
+            this._fillText(`${name}  ${p.trickScore}分  (${sign}${delta}分)`, cx, y, {
+                size: 26, color: col, bold: true, center: true,
+            });
+            y += 58;
+        }
+
+        let wi = 0;
+        for (let i = 1; i < 3; i++) {
+            if (game.players[i].trickScore > game.players[wi].trickScore) wi = i;
+        }
+        const wname = game.players[wi].isHuman ? '你' : game.players[wi].name;
+        this._fillText(`本局赢家: ${wname}!`, cx, y + 10, {
+            size: 28, color: C_GOLD, bold: true, center: true,
+        });
+
+        const rbw = Math.min(220, bw * 0.4);
+        const rbh = 54;
+        const rbx = cx - rbw / 2;
+        const rby = by + bh - rbh - 20;
+        this._restartBtnRect = this.drawButton('再来一局', rbx, rby, rbw, rbh, C_BTN_GREEN, true);
+    }
+
+    // ------------------------------------------------------------------
+    // Card tracker popup
+    // ------------------------------------------------------------------
+    _drawCardTracker() {
+        const ctx = this.ctx;
+        const W = this.canvas.width;
+        const H = this.canvas.height;
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, W, H);
+
+        const pw = Math.min(860, W * 0.9);
+        const ph = Math.min(380, H * 0.55);
+        const bx = (W - pw) / 2;
+        const by = 80;
+
+        this._roundRect(bx, by, pw, ph, 14);
+        ctx.fillStyle = '#142846';
+        ctx.fill();
+        ctx.strokeStyle = C_GOLD;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+
+        const cxBox = bx + pw / 2;
+        this._fillText('记牌器', cxBox, by + 16, { size: 22, color: C_GOLD, bold: true, center: true });
+        this._fillText('点击任意处关闭', bx + pw - 120, by + 8, { size: 12, color: C_GRAY });
+
+        const playedCnt = {};
+        for (const card of this.playedCards) {
+            const key = `${card.suit}_${card.rank}`;
+            playedCnt[key] = (playedCnt[key] || 0) + 1;
+        }
+
+        const TRACK_RANKS = ['A', 'K', 'Q', 'J', '5'];
+        const TOTAL_PER   = 4;
+
+        const colLabels = ['花色', 'A', 'K', 'Q', 'J', '5'];
+        const colXs     = colLabels.map((_, i) => bx + 18 + i * Math.round(pw / 7));
+        const headerY   = by + 52;
+
+        for (let i = 0; i < colLabels.length; i++) {
+            this._fillText(colLabels[i], colXs[i], headerY, { size: 15, color: C_GOLD, bold: true });
+        }
+        ctx.beginPath();
+        ctx.moveTo(bx + 10, headerY + 22);
+        ctx.lineTo(bx + pw - 10, headerY + 22);
+        ctx.strokeStyle = C_GRAY;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+
+        const suitList = [SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS];
+        const suitCnMap = { spades: '黑桃', hearts: '红心', clubs: '梅花', diamonds: '方块' };
+        let rowY = headerY + 30;
+        const trump = this.game.trumpSuit;
+
+        for (const suit of suitList) {
+            const isTs = suit === trump;
+            const symCol = isTs ? '#ffd200' : (SUIT_COLOR_MAP[suit] || C_BLACK);
+            const suitCnVal = suitCnMap[suit] + (isTs ? ' ★' : '');
+
+            this._fillText(`${SUIT_SYMBOL[suit]} ${suitCnVal}`, colXs[0], rowY, {
+                size: 14, color: symCol, bold: isTs,
+            });
+
+            for (let ci = 0; ci < TRACK_RANKS.length; ci++) {
+                const rank   = TRACK_RANKS[ci];
+                const played = playedCnt[`${suit}_${rank}`] || 0;
+                const remain = TOTAL_PER - played;
+                let col, txt;
+                if (remain === 0) {
+                    col = '#464646'; txt = '─';
+                } else if (played > 0) {
+                    col = '#e6d250'; txt = `剩${remain}`;
+                } else {
+                    col = C_WHITE; txt = String(TOTAL_PER);
+                }
+                this._fillText(txt, colXs[ci + 1], rowY, { size: 15, color: col, bold: remain > 0 });
+            }
+            rowY += 30;
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(bx + 10, rowY + 2);
+        ctx.lineTo(bx + pw - 10, rowY + 2);
+        ctx.strokeStyle = C_GRAY;
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+        rowY += 12;
+
+        this._fillText('主牌组', bx + 18, rowY, { size: 14, color: C_GOLD, bold: true });
+        const trumpGroups = [
+            ['10', 16, '10\u00d716'], ['2', 16, '2\u00d716'],
+            ['small_joker', 4, '小王\u00d74'], ['big_joker', 4, '大王\u00d74'],
+            ['character', 4, '字牌\u00d74'], ['3', 2, '3\u00d72'],
+        ];
+        let tx = bx + 80;
+        for (const [rank, total, label] of trumpGroups) {
+            let played = 0;
+            if (rank === '10' || rank === '2') {
+                for (const s of suitList) played += (playedCnt[`${s}_${rank}`] || 0);
+            } else if (rank === '3') {
+                played = playedCnt[`${SUIT_SPADES}_${rank}`] || 0;
+            } else {
+                played = playedCnt[`${SUIT_SPECIAL}_${rank}`] || 0;
+            }
+            const remain = total - played;
+            let col;
+            if (remain === 0)       col = '#464646';
+            else if (played > 0)    col = '#e6d250';
+            else                    col = '#b4dcff';
+
+            let cell;
+            if (remain === 0)       cell = label + '\u2713';
+            else if (played > 0)    cell = `${label}\u2192剩${remain}`;
+            else                    cell = label;
+
+            ctx.font = `bold 13px ${FONT_STACK}`;
+            const tw = ctx.measureText(cell).width;
+            if (tx + tw > bx + pw - 10) {
+                tx = bx + 80;
+                rowY += 22;
+            }
+            this._fillText(cell, tx, rowY, { size: 13, color: col, bold: true });
+            tx += tw + 16;
+        }
+
+        const legendY = by + ph - 30;
+        const legends = [
+            ['#464646', '─全出'],
+            ['#e6d250', '黄=部分剩余'],
+            [C_WHITE, '白=未出任何'],
+        ];
+        let lx = bx + 20;
+        for (const [c, t] of legends) {
+            this._fillText(t, lx, legendY, { size: 12, color: c });
+            ctx.font = `12px ${FONT_STACK}`;
+            lx += ctx.measureText(t).width + 20;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Main render
+    // ------------------------------------------------------------------
+    render() {
+        const ctx    = this.ctx;
+        const layout = this._layout();
+
+        ctx.fillStyle = C_BG;
+        ctx.fillRect(0, 0, layout.W, layout.H);
+
+        for (const area of [layout.top, layout.left, layout.center, layout.right, layout.bottom]) {
+            this.drawPanel(area);
+        }
+
+        this._drawPlayers(layout, this.game);
+        this._drawTrickArea(layout.center, this.game);
+        this.drawScorePanel(layout.right, this.game);
+        this.drawMessages(layout.center, this.messageLog);
+        this._drawButtons(layout, this.game);
+
+        if (this.game.phase === Phase.GAME_END) {
+            this.drawGameEnd(this.game);
+        }
+
+        if (this.showTracker) {
+            this._drawCardTracker();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Draw all 3 players' hands
+    // ------------------------------------------------------------------
+    _drawPlayers(layout, game) {
+        const { top, left, bottom, right } = layout;
+        const cardW = layout.cardW;
+        const cardH = layout.cardH;
+
+        // === Top: AI2 (face-down horizontal) ===
+        const p2 = game.players[2];
+        this._fillText(`${p2.name}  [${p2.hand.length}张]`, top.x + 10, top.y + 4, {
+            size: 17, color: C_WHITE, bold: true,
+        });
+        if (p2.hand.length > 0) {
+            this.drawHandHorizontal(p2.hand, top.x, top.y + 26, top.w, {
+                faceUp: false,
+                cardH: Math.round(cardH * 0.65),
+            });
+        }
+
+        // === Left: AI0 (face-down vertical) ===
+        const p0 = game.players[0];
+        this._fillText(`${p0.name}  [${p0.hand.length}张]`, left.x + 5, left.y + 5, {
+            size: 15, color: C_WHITE, bold: true,
+        });
+        if (p0.hand.length > 0) {
+            this.drawHandVertical(p0.hand, left.x + 8, left.y + 30, left.h - 40);
+        }
+
+        // === Bottom: Human player (face-up) ===
+        const p1    = game.players[1];
+        const myTurn = game.phase === Phase.PLAY && game.whoLeads() === 1 && !this.showingTrickResult;
+
+        const revealed  = this._dealRevealedCount();
+        const isDealing = game.phase === Phase.CALL_TRUMP && revealed < this.DEAL_TOTAL;
+        let label;
+        if (isDealing) {
+            label = `你 — 正在摸牌... (${revealed}/${this.DEAL_TOTAL})`;
+        } else {
+            label = '你' + (myTurn ? ' 《轮到你出牌》' : '');
+        }
+        this._fillText(label, bottom.x + 10, bottom.y + 4, {
+            size: 18, color: C_HIGHLIGHT, bold: true,
+        });
+
+        let callableIdx = [];
+        if (game.phase === Phase.CALL_TRUMP) {
+            callableIdx = p1.hand
+                .map((c, i) => canCallTrump([c]) ? i : -1)
+                .filter(i => i >= 0);
+        }
+
+        const handAreaW = bottom.w - right.w - layout.pad;
+
+        if (isDealing) {
+            const n = p1.hand.length;
+            if (n === 0) { this.humanHandRects = []; return; }
+            const margin = 5;
+            const totalNatural = n * cardW + (n - 1) * margin;
+            let step;
+            if (totalNatural <= handAreaW) {
+                step = cardW + margin;
+            } else {
+                step = Math.max(Math.round(cardW * 0.26),
+                    Math.round((handAreaW - cardW) / Math.max(n - 1, 1)));
+            }
+            const actualW = cardW + (n - 1) * step;
+            const startX  = bottom.x + Math.round((handAreaW - actualW) / 2);
+
+            this.humanHandRects = [];
+            const selOffset = Math.round(16 * cardH / 100);
+            for (let i = 0; i < n; i++) {
+                const fu = i < revealed;
+                const isCallable = fu && callableIdx.includes(i);
+                const isSel = this.selectedIndices.includes(i);
+                const offY  = isSel ? -selOffset : 0;
+                const r = this.drawCard(
+                    p1.hand[i],
+                    startX + i * step,
+                    bottom.y + 32 + offY,
+                    cardW, cardH,
+                    fu, isSel, isCallable
+                );
+                this.humanHandRects.push(r);
+            }
+        } else {
+            this.humanHandRects = this.drawHandHorizontal(
+                p1.hand,
+                bottom.x, bottom.y + 32,
+                handAreaW,
+                {
+                    faceUp: true,
+                    selectedIndices: this.selectedIndices,
+                    callableIndices: game.phase === Phase.CALL_TRUMP ? callableIdx : null,
+                    cardH,
+                }
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Trick area (center)
+    // ------------------------------------------------------------------
+    _drawTrickArea(area, game) {
+        const cx = area.x + area.w / 2;
+        const cy = area.y + area.h / 2;
+        const layout = this._layout();
+        const cardW = layout.cardW;
+        const cardH = layout.cardH;
+
+        this._fillText('当前一轮', area.x + 12, area.y + 8, {
+            size: 16, color: C_GOLD, bold: true,
+        });
+
+        if (game.trumpSuit) {
+            const ts = SUIT_DISPLAY_NAME[game.trumpSuit] || '';
+            this._fillText(`活主: ${ts}`, area.x + 12, area.y + 30, {
+                size: 15, color: C_GOLD,
+            });
+        } else if (game.callTrumpDone) {
+            this._fillText('常主模式', area.x + 12, area.y + 30, {
+                size: 15, color: C_GOLD,
+            });
+        } else {
+            this._fillText('叫主阶段...', area.x + 12, area.y + 30, {
+                size: 15, color: C_HIGHLIGHT,
+            });
+        }
+
+        const offX = area.w * 0.22;
+        const offY = area.h * 0.18;
+        const posMap = {
+            0: [cx - offX - cardW, cy - offY],
+            1: [cx - cardW / 2,    cy + offY],
+            2: [cx + offX,         cy - offY],
+        };
+
+        for (const entry of game.currentTrick) {
+            const [px, py] = posMap[entry.playerIdx];
+            const pname = game.players[entry.playerIdx].name;
+            this._fillText(pname, px, py - 20, { size: 14, color: C_GRAY });
+            for (let j = 0; j < entry.cards.length; j++) {
+                this.drawCard(entry.cards[j], px + j * (cardW + 3), py, cardW, cardH);
+            }
+        }
+
+        if (game.phase === Phase.CALL_TRUMP) {
+            const revealed = this._dealRevealedCount();
+            if (revealed < this.DEAL_TOTAL) {
+                const pct = Math.round(revealed / this.DEAL_TOTAL * 100);
+                this._fillText(`正在发牌... ${pct}%`, cx, cy - 20, {
+                    size: 20, color: C_HIGHLIGHT, center: true,
+                });
+                const barW = Math.min(300, area.w * 0.5);
+                this._roundRect(cx - barW / 2, cy + 10, barW, 14, 6);
+                this.ctx.fillStyle = C_DARK_GRAY;
+                this.ctx.fill();
+                const fillW = Math.round(barW * pct / 100);
+                if (fillW > 0) {
+                    this._roundRect(cx - barW / 2, cy + 10, fillW, 14, 6);
+                    this.ctx.fillStyle = C_BTN_GREEN;
+                    this.ctx.fill();
+                }
+            } else if (game.trumpCaller !== -1) {
+                const cname   = game.players[game.trumpCaller].name;
+                const callStr = game.trumpCallCards.map(c => c.displayName()).join(' ');
+                this._fillText(`当前叫主: ${cname}`, cx, cy - 30, {
+                    size: 16, color: C_HIGHLIGHT, center: true,
+                });
+                this._fillText(callStr, cx, cy - 10, {
+                    size: 16, color: C_GOLD, center: true,
+                });
+                this._fillText('↓ 你可选牌反主，或 Pass', cx, cy + 14, {
+                    size: 14, color: '#ffc850', center: true,
+                });
+            } else {
+                this._fillText('尚无人叫主，可抢先叫', cx, cy - 10, {
+                    size: 16, color: C_GRAY, center: true,
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Buttons
+    // ------------------------------------------------------------------
+    _drawButtons(layout, game) {
+        this._buttonRects = {};
+        const { bottom, right } = layout;
+        const btnH = Math.round(layout.cardH * 0.4);
+        const btnW = Math.round(layout.cardW * 2.1);
+        const btnY = bottom.y - btnH - 10;
+
+        const handAreaW = bottom.w - right.w - layout.pad;
+        const centerX   = bottom.x + handAreaW / 2;
+
+        if (game.phase === Phase.CALL_TRUMP) {
+            const sel = this.selectedIndices
+                .filter(i => i < game.players[1].hand.length)
+                .map(i => game.players[1].hand[i]);
+            const cur = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+            const callEnabled = cur ? canCounterTrump(sel, cur) : canCallTrump(sel);
+
+            const now     = Date.now();
+            const dealEnd = this.dealStartTime + this.DEAL_DURATION;
+            if (now >= dealEnd) {
+                const remaining = Math.max(0, (this.CALL_WINDOW - (now - dealEnd)) / 1000);
+                const col = remaining < 2 ? '#ff6432' : C_HIGHLIGHT;
+                this._fillText(`叫主窗口剩余: ${remaining.toFixed(1)}s`, centerX, btnY - 22, {
+                    size: 14, color: col, center: true,
+                });
+            }
+
+            const gap    = 16;
+            const totalW = btnW * 2 + gap;
+            const sx     = centerX - totalW / 2;
+
+            this._buttonRects.call = this.drawButton('叫主', sx, btnY, btnW, btnH, C_BTN_GREEN, callEnabled);
+            this._buttonRects.pass = this.drawButton('Pass', sx + btnW + gap, btnY, btnW, btnH, C_BTN_GRAY, true);
+
+        } else if (game.phase === Phase.PLAY) {
+            const leader = game.whoLeads();
+            if (leader === 1 && !this.showingTrickResult) {
+                const enabled = this.selectedIndices.length > 0;
+                this._buttonRects.play = this.drawButton(
+                    '出牌', centerX - btnW / 2, btnY, btnW, btnH, C_BTN_GREEN, enabled
+                );
+            }
+        }
+
+        const tbW = Math.round(right.w * 0.55);
+        const tbH = 36;
+        this._buttonRects.tracker = this.drawButton(
+            '记牌器',
+            right.x + 10,
+            right.y + right.h - tbH - 8,
+            tbW, tbH,
+            '#325082', true
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Deal animation helper
+    // ------------------------------------------------------------------
+    _dealRevealedCount() {
+        const elapsed = Date.now() - this.dealStartTime;
+        if (elapsed >= this.DEAL_DURATION) return this.DEAL_TOTAL;
+        return Math.max(1, Math.floor(elapsed / this.DEAL_DURATION * this.DEAL_TOTAL));
+    }
+
+    // ------------------------------------------------------------------
+    // Sort human hand
+    // ------------------------------------------------------------------
+    _sortHumanHand() {
+        const hand  = this.game.players[1].hand;
+        const trump = this.game.trumpSuit;
+        const suitOrder = {
+            [SUIT_SPADES]: 1, [SUIT_HEARTS]: 2,
+            [SUIT_CLUBS]: 3,  [SUIT_DIAMONDS]: 4,
+        };
+
+        hand.sort((a, b) => {
+            const aIsTrump = isTrump(a, trump);
+            const bIsTrump = isTrump(b, trump);
+            if (aIsTrump && !bIsTrump) return -1;
+            if (!aIsTrump && bIsTrump) return 1;
+            if (aIsTrump && bIsTrump) {
+                return cardPower(b, trump) - cardPower(a, trump);
+            }
+            const aSuit = suitOrder[a.suit] ?? 5;
+            const bSuit = suitOrder[b.suit] ?? 5;
+            if (aSuit !== bSuit) return aSuit - bSuit;
+            return cardPower(b, trump) - cardPower(a, trump);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Add message
+    // ------------------------------------------------------------------
+    addMessage(msg) {
+        this.messageLog.push(msg);
+        if (this.messageLog.length > 8) this.messageLog.shift();
+    }
+
+    // ------------------------------------------------------------------
+    // Get button rects for input handling
+    // ------------------------------------------------------------------
+    getButtonRects() {
+        return this._buttonRects;
+    }
+}
+
+// =========================================================================
+// input.js
+// =========================================================================
+
+/**
+ * input.js - 用户输入处理（鼠标 + 触摸）及游戏更新循环（AI计时、出牌结算）
+ */
+
+// ---------------------------------------------------------------------------
+// Helper: display names joined by space (input.js version)
+// ---------------------------------------------------------------------------
+
+function cardsCnInput(cards) {
+    return cards.map(c => c.displayName()).join(' ');
+}
+
+// ---------------------------------------------------------------------------
+// Hit test helpers
+// ---------------------------------------------------------------------------
+
+function _hit(pos, rect) {
+    return pos.x >= rect.x && pos.x <= rect.x + rect.w &&
+           pos.y >= rect.y && pos.y <= rect.y + rect.h;
+}
+
+function _hitInflated(pos, rect, inflate) {
+    return pos.x >= rect.x && pos.x <= rect.x + rect.w &&
+           pos.y >= rect.y - inflate && pos.y <= rect.y + rect.h + inflate;
+}
+
+// ---------------------------------------------------------------------------
+// InputHandler class
+// ---------------------------------------------------------------------------
+
+class InputHandler {
+    constructor(canvas, renderer) {
+        this._canvas   = canvas;
+        this._renderer = renderer;
+
+        canvas.addEventListener('mousedown', (e) => {
+            this._onPointer(e.clientX, e.clientY);
+        });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            this._onPointer(t.clientX, t.clientY);
+        }, { passive: false });
+    }
+
+    _toCanvasPos(clientX, clientY) {
+        const rect   = this._canvas.getBoundingClientRect();
+        const scaleX = this._canvas.width  / rect.width;
+        const scaleY = this._canvas.height / rect.height;
+        return {
+            x: (clientX - rect.left) * scaleX,
+            y: (clientY - rect.top)  * scaleY,
+        };
+    }
+
+    _onPointer(clientX, clientY) {
+        const renderer = this._renderer;
+        const game     = renderer.game;
+        const pos      = this._toCanvasPos(clientX, clientY);
+        const btns     = renderer.getButtonRects();
+
+        if (renderer.showTracker) {
+            renderer.showTracker = false;
+            return;
+        }
+
+        if (btns.tracker && _hit(pos, btns.tracker)) {
+            renderer.showTracker = true;
+            return;
+        }
+
+        if (game.phase === Phase.GAME_END) {
+            if (renderer._restartBtnRect && _hit(pos, renderer._restartBtnRect)) {
+                game.reset();
+                renderer.selectedIndices    = [];
+                renderer.showingTrickResult = false;
+                renderer.lastTrickDisplay   = 0;
+                renderer.aiPending          = false;
+                renderer.aiActionTime       = 0;
+                renderer._aiCallTimes       = null;
+                renderer.playedCards        = [];
+                renderer.dealStartTime      = Date.now();
+                renderer._sortHumanHand();
+                renderer.addMessage('新局开始');
+            }
+            return;
+        }
+
+        if (game.phase === Phase.CALL_TRUMP) {
+            this._clickCallTrump(pos);
+            return;
+        }
+
+        if (game.phase === Phase.PLAY) {
+            this._clickPlay(pos);
+            return;
+        }
+    }
+
+    _clickCallTrump(pos) {
+        const renderer = this._renderer;
+        const game     = renderer.game;
+        const btns     = renderer.getButtonRects();
+        const hand     = game.players[1].hand;
+        const revealed = renderer._dealRevealedCount();
+
+        const rects = renderer.humanHandRects;
+        for (let i = rects.length - 1; i >= 0; i--) {
+            if (i >= revealed) continue;
+            if (_hitInflated(pos, rects[i], 22)) {
+                const selIdx = renderer.selectedIndices.indexOf(i);
+                if (selIdx !== -1) {
+                    renderer.selectedIndices.splice(selIdx, 1);
+                } else {
+                    renderer.selectedIndices.push(i);
+                }
+                return;
+            }
+        }
+
+        if (btns.call && _hit(pos, btns.call)) {
+            const sel = renderer.selectedIndices
+                .filter(i => i < hand.length)
+                .sort((a, b) => a - b)
+                .map(i => hand[i]);
+
+            const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+            const valid = currentCall
+                ? canCounterTrump(sel, currentCall)
+                : canCallTrump(sel);
+
+            if (valid) {
+                const ok = game.processCallTrump(1, sel);
+                if (ok) {
+                    renderer.selectedIndices = [];
+                    renderer._sortHumanHand();
+                    renderer.addMessage(`你叫主: ${cardsCnInput(sel)}`);
+                }
+            } else {
+                renderer.addMessage('所选牌不能叫主');
+            }
+            return;
+        }
+
+        if (btns.pass && _hit(pos, btns.pass)) {
+            game.processCallTrump(1, null);
+            renderer.selectedIndices = [];
+            renderer.addMessage('你 Pass');
+            return;
+        }
+    }
+
+    _clickPlay(pos) {
+        const renderer = this._renderer;
+        const game     = renderer.game;
+        const btns     = renderer.getButtonRects();
+
+        if (renderer.showingTrickResult) return;
+        if (game.whoLeads() !== 1) return;
+
+        const hand  = game.players[1].hand;
+        const rects = renderer.humanHandRects;
+
+        for (let i = rects.length - 1; i >= 0; i--) {
+            if (_hitInflated(pos, rects[i], 22)) {
+                const selIdx = renderer.selectedIndices.indexOf(i);
+                if (selIdx !== -1) {
+                    renderer.selectedIndices.splice(selIdx, 1);
+                } else {
+                    renderer.selectedIndices.push(i);
+                }
+                return;
+            }
+        }
+
+        if (btns.play && _hit(pos, btns.play)) {
+            if (renderer.selectedIndices.length === 0) return;
+
+            const sel = renderer.selectedIndices
+                .filter(i => i < hand.length)
+                .sort((a, b) => a - b)
+                .map(i => hand[i]);
+
+            if (sel.length === 0) return;
+
+            const [ok, err] = game.playCards(1, sel);
+            if (ok) {
+                renderer.selectedIndices = [];
+                renderer._sortHumanHand();
+                renderer.addMessage(`你出牌: ${cardsCnInput(sel)}`);
+                _afterPlay(renderer, game);
+            } else {
+                renderer.addMessage(`出牌无效: ${err}`);
+            }
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// After-play hook
+// ---------------------------------------------------------------------------
+
+function _afterPlay(renderer, game) {
+    if (!game.isTrickComplete()) return;
+
+    const winner     = game.resolveTrick();
+    const trickScore = game.currentTrick.reduce((sum, e) => sum + e.score(), 0);
+    const wname      = game.players[winner].name;
+
+    renderer.addMessage(`${wname} 赢得本轮${trickScore > 0 ? `，得${trickScore}分` : ''}`);
+
+    for (const entry of game.currentTrick) {
+        renderer.playedCards.push(...entry.cards);
+    }
+
+    renderer.showingTrickResult = true;
+    renderer.lastTrickDisplay   = Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Update loop
+// ---------------------------------------------------------------------------
+
+function updateGame(renderer) {
+    const game = renderer.game;
+
+    if (renderer.showingTrickResult) {
+        if (Date.now() - renderer.lastTrickDisplay >= 1800) {
+            renderer.showingTrickResult = false;
+
+            if (game.allTricksDone || game.phase === Phase.GAME_END) {
+                game.phase = Phase.GAME_END;
+            } else {
+                game.startNextTrick();
+                renderer._sortHumanHand();
+                renderer.aiPending  = false;
+                renderer.aiActionTime = 0;
+            }
+        }
+        return;
+    }
+
+    if (game.phase === Phase.CALL_TRUMP) {
+        _updateCallTrump(renderer, game);
+        return;
+    }
+
+    if (game.phase === Phase.PLAY) {
+        _updatePlay(renderer, game);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call-trump update
+// ---------------------------------------------------------------------------
+
+function _updateCallTrump(renderer, game) {
+    const now     = Date.now();
+    const dealEnd = renderer.dealStartTime + renderer.DEAL_DURATION;
+
+    if (now < dealEnd) return;
+
+    if (!renderer._aiCallTimes) {
+        renderer._aiCallTimes = {
+            ai0: dealEnd + 1500 + Math.random() * 2000,
+            ai2: dealEnd + 3500 + Math.random() * 2500,
+            ai0Done: false,
+            ai2Done: false,
+        };
+    }
+
+    const times = renderer._aiCallTimes;
+
+    if (!times.ai0Done && now >= times.ai0) {
+        times.ai0Done = true;
+        const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+        const callCards   = aiDecideCallTrump(game.players[0].hand, currentCall);
+        if (callCards) {
+            const ok = game.processCallTrump(0, callCards);
+            if (ok) {
+                renderer._sortHumanHand();
+                renderer.addMessage(`${game.players[0].name} 叫主: ${cardsCnInput(callCards)}`);
+            }
+        } else {
+            console.log(`${game.players[0].name} Pass (叫主)`);
+        }
+    }
+
+    if (!times.ai2Done && now >= times.ai2) {
+        times.ai2Done = true;
+        const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+        const callCards   = aiDecideCallTrump(game.players[2].hand, currentCall);
+        if (callCards) {
+            const ok = game.processCallTrump(2, callCards);
+            if (ok) {
+                renderer._sortHumanHand();
+                renderer.addMessage(`${game.players[2].name} 叫主: ${cardsCnInput(callCards)}`);
+            }
+        } else {
+            console.log(`${game.players[2].name} Pass (叫主)`);
+        }
+    }
+
+    if (now >= dealEnd + renderer.CALL_WINDOW) {
+        game.finishCallTrump();
+        renderer._aiCallTimes = null;
+        renderer._sortHumanHand();
+        renderer.addMessage(game.message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Play update
+// ---------------------------------------------------------------------------
+
+function _updatePlay(renderer, game) {
+    const leader = game.whoLeads();
+
+    if (leader === -1 || leader === 1) return;
+
+    const now = Date.now();
+
+    if (!renderer.aiPending) {
+        renderer.aiPending    = true;
+        renderer.aiActionTime = now + renderer.aiDelay;
+        return;
+    }
+
+    if (now < renderer.aiActionTime) return;
+
+    renderer.aiPending = false;
+
+    const hand       = game.players[leader].hand;
+    const trumpSuit  = game.trumpSuit;
+    const ledCards   = game.getLedCards();
+    const anyUnplayed = game.players.some((p, i) => i !== leader && !p.hasPlayed);
+
+    let cards;
+    try {
+        if (!ledCards) {
+            cards = aiLead(hand, trumpSuit, anyUnplayed);
+        } else {
+            const currentBest  = game.getCurrentBest() ?? [];
+            const trickHasScore = game.trickHasScore();
+            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
+        }
+
+        if (ledCards && cards.length !== ledCards.length) {
+            const needed = ledCards.length;
+            if (cards.length > needed) {
+                cards = cards.slice(0, needed);
+            } else {
+                const extra = hand.filter(c => !cards.includes(c));
+                cards = [...cards, ...extra].slice(0, needed);
+            }
+        }
+
+        cards = cards.filter(c => hand.includes(c));
+        if (cards.length === 0) cards = hand.slice(0, ledCards ? ledCards.length : 1);
+
+    } catch (e) {
+        console.error('AI decision error:', e);
+        const n = ledCards ? ledCards.length : 1;
+        cards = hand.slice(0, n);
+    }
+
+    const [ok, err] = game.playCards(leader, cards, true);
+    if (ok) {
+        renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCnInput(cards)}`);
+        _afterPlay(renderer, game);
+    } else {
+        console.warn(`AI playCards failed (${err}), using fallback`);
+        const n       = ledCards ? ledCards.length : 1;
+        const fbCards = hand.slice(0, Math.min(n, hand.length));
+        const [fbOk]  = game.playCards(leader, fbCards, true);
+        if (fbOk) {
+            renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCnInput(fbCards)}`);
+            _afterPlay(renderer, game);
+        }
+    }
+}
+
+// =========================================================================
+// main.js — game entry point (runs at load time)
+// =========================================================================
+
+const canvas = document.getElementById('game');
+
+let needsResize = true;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  needsResize = false;
+}
+
+window.addEventListener('resize', () => { needsResize = true; });
+window.addEventListener('orientationchange', () => setTimeout(() => { needsResize = true; }, 100));
+resize();
+
+const game = new GameState();
+const renderer = new GameRenderer(canvas, game);
+const input = new InputHandler(canvas, renderer);
+renderer.addMessage('游戏开始！叫主阶段...');
+
+function loop() {
+  if (needsResize) resize();
+  updateGame(renderer);
+  renderer.render();
+  requestAnimationFrame(loop);
+}
+
+loop();
+
+})();
+</script>
+</body>
+</html>
