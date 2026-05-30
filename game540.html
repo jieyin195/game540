@@ -354,17 +354,7 @@ function bestCardInGroup(cards, trumpSuit) {
  * @returns {string}
  */
 function pairKey(card, trumpSuit) {
-    const rank = card.rank;
-    const suit = card.suit;
-
-    if (trumpSuit !== null && trumpSuit !== undefined) {
-        if (rank === '10' && suit !== trumpSuit && suit !== SUIT_SPECIAL) return 'non_trump_10';
-        if (rank === '2'  && suit !== trumpSuit && suit !== SUIT_SPECIAL) return 'non_trump_2';
-    } else {
-        if (rank === '10' && suit !== SUIT_SPECIAL) return 'all_10';
-        if (rank === '2'  && suit !== SUIT_SPECIAL) return 'all_2';
-    }
-    return `${suit}_${rank}`;
+    return `${card.suit}_${card.rank}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -717,6 +707,27 @@ function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
     if (!currentBest || currentBest.length === 0) return false;
     const bestPower = Math.max(...currentBest.map(c => cardPower(c, trumpSuit, c.playOrder)));
+
+    const ledType = getPlayType(ledCards, trumpSuit);
+
+    if (ledType === PlayType.PAIR) {
+        for (const pair of getPairs(handInSuit, trumpSuit)) {
+            if (Math.max(cardPower(pair[0], trumpSuit, 0), cardPower(pair[1], trumpSuit, 0)) > bestPower) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (ledType === PlayType.TRIPLE) {
+        for (const triple of getTriples(handInSuit, trumpSuit)) {
+            if (Math.max(...triple.map(c => cardPower(c, trumpSuit, 0))) > bestPower) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     for (const card of handInSuit) {
         if (cardPower(card, trumpSuit, 0) > bestPower) return true;
     }
@@ -1787,6 +1798,13 @@ class GameRenderer {
         /** @type {Object|null} */
         this._aiCallTimes = null;
 
+        // 叫主轮询状态
+        this.callPhase        = 'idle';  // 'idle' | 'calling' | 'countering'
+        this.callOrder        = [];
+        this.callCurrent      = -1;
+        this.callWaitHuman    = false;
+        this.callAiTime       = 0;
+
         /** @type {Object<string,{x:number,y:number,w:number,h:number}>} */
         this._buttonRects = {};
         /** @type {{x:number,y:number,w:number,h:number}|null} */
@@ -2656,20 +2674,55 @@ class GameRenderer {
                     this.ctx.fillStyle = C_BTN_GREEN;
                     this.ctx.fill();
                 }
-            } else if (game.trumpCaller !== -1) {
+            } else if (this.callPhase === 'countering') {
                 const cname   = game.players[game.trumpCaller].name;
                 const callStr = game.trumpCallCards.map(c => c.displayName()).join(' ');
-                this._fillText(`当前叫主: ${cname}`, cx, cy - 30, {
+                this._fillText(`当前叫主: ${cname}`, cx, cy - 40, {
                     size: 16, color: C_HIGHLIGHT, center: true,
                 });
-                this._fillText(callStr, cx, cy - 10, {
+                this._fillText(callStr, cx, cy - 18, {
                     size: 16, color: C_GOLD, center: true,
                 });
-                this._fillText('↓ 你可选牌反主，或 Pass', cx, cy + 14, {
-                    size: 14, color: '#ffc850', center: true,
-                });
+                const who = this.callCurrent;
+                if (who === 1) {
+                    this._fillText('轮到你决定是否反主', cx, cy + 10, {
+                        size: 16, color: '#ffc850', center: true,
+                    });
+                    this._fillText('↓ 选牌反主，或点 Pass', cx, cy + 32, {
+                        size: 14, color: '#ffc850', center: true,
+                    });
+                } else if (who >= 0) {
+                    const whoName = game.players[who].name;
+                    this._fillText(`${whoName} 正在决定是否反主...`, cx, cy + 10, {
+                        size: 16, color: C_GRAY, center: true,
+                    });
+                }
+            } else if (this.callPhase === 'calling') {
+                const who = this.callCurrent;
+                if (game.trumpCaller !== -1) {
+                    const cname   = game.players[game.trumpCaller].name;
+                    const callStr = game.trumpCallCards.map(c => c.displayName()).join(' ');
+                    this._fillText(`当前叫主: ${cname}`, cx, cy - 30, {
+                        size: 16, color: C_HIGHLIGHT, center: true,
+                    });
+                    this._fillText(callStr, cx, cy - 10, {
+                        size: 16, color: C_GOLD, center: true,
+                    });
+                } else if (who === 1) {
+                    this._fillText('轮到你决定是否叫主', cx, cy - 10, {
+                        size: 16, color: '#ffc850', center: true,
+                    });
+                    this._fillText('↓ 选牌叫主，或点 Pass', cx, cy + 12, {
+                        size: 14, color: '#ffc850', center: true,
+                    });
+                } else if (who >= 0) {
+                    const whoName = game.players[who].name;
+                    this._fillText(`${whoName} 正在决定是否叫主...`, cx, cy - 10, {
+                        size: 16, color: C_GRAY, center: true,
+                    });
+                }
             } else {
-                this._fillText('尚无人叫主，可抢先叫', cx, cy - 10, {
+                this._fillText('等待叫主...', cx, cy - 10, {
                     size: 16, color: C_GRAY, center: true,
                 });
             }
@@ -2690,28 +2743,23 @@ class GameRenderer {
         const centerX   = bottom.x + handAreaW / 2;
 
         if (game.phase === Phase.CALL_TRUMP) {
-            const sel = this.selectedIndices
-                .filter(i => i < game.players[1].hand.length)
-                .map(i => game.players[1].hand[i]);
-            const cur = game.trumpCaller !== -1 ? game.trumpCallCards : null;
-            const callEnabled = cur ? canCounterTrump(sel, cur) : canCallTrump(sel);
+            const humanTurn = this.callWaitHuman && this.callCurrent === 1;
 
-            const now     = Date.now();
-            const dealEnd = this.dealStartTime + this.DEAL_DURATION;
-            if (now >= dealEnd) {
-                const remaining = Math.max(0, (this.CALL_WINDOW - (now - dealEnd)) / 1000);
-                const col = remaining < 2 ? '#ff6432' : C_HIGHLIGHT;
-                this._fillText(`叫主窗口剩余: ${remaining.toFixed(1)}s`, centerX, btnY - 22, {
-                    size: 14, color: col, center: true,
-                });
+            if (humanTurn) {
+                const sel = this.selectedIndices
+                    .filter(i => i < game.players[1].hand.length)
+                    .map(i => game.players[1].hand[i]);
+                const cur = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+                const callEnabled = cur ? canCounterTrump(sel, cur) : canCallTrump(sel);
+
+                const btnLabel = this.callPhase === 'countering' ? '反主' : '叫主';
+                const gap    = 16;
+                const totalW = btnW * 2 + gap;
+                const sx     = centerX - totalW / 2;
+
+                this._buttonRects.call = this.drawButton(btnLabel, sx, btnY, btnW, btnH, C_BTN_GREEN, callEnabled);
+                this._buttonRects.pass = this.drawButton('Pass', sx + btnW + gap, btnY, btnW, btnH, C_BTN_GRAY, true);
             }
-
-            const gap    = 16;
-            const totalW = btnW * 2 + gap;
-            const sx     = centerX - totalW / 2;
-
-            this._buttonRects.call = this.drawButton('叫主', sx, btnY, btnW, btnH, C_BTN_GREEN, callEnabled);
-            this._buttonRects.pass = this.drawButton('Pass', sx + btnW + gap, btnY, btnW, btnH, C_BTN_GRAY, true);
 
         } else if (game.phase === Phase.PLAY) {
             const leader = game.whoLeads();
@@ -2870,6 +2918,11 @@ class InputHandler {
                 renderer.aiPending          = false;
                 renderer.aiActionTime       = 0;
                 renderer._aiCallTimes       = null;
+                renderer.callPhase          = 'idle';
+                renderer.callOrder          = [];
+                renderer.callCurrent        = -1;
+                renderer.callWaitHuman      = false;
+                renderer.callAiTime         = 0;
                 renderer.playedCards        = [];
                 renderer.dealStartTime      = Date.now();
                 renderer._sortHumanHand();
@@ -2896,6 +2949,8 @@ class InputHandler {
         const hand     = game.players[1].hand;
         const revealed = renderer._dealRevealedCount();
 
+        const humanTurn = renderer.callWaitHuman && renderer.callCurrent === 1;
+
         const rects = renderer.humanHandRects;
         for (let i = rects.length - 1; i >= 0; i--) {
             if (i >= revealed) continue;
@@ -2910,7 +2965,7 @@ class InputHandler {
             }
         }
 
-        if (btns.call && _hit(pos, btns.call)) {
+        if (humanTurn && btns.call && _hit(pos, btns.call)) {
             const sel = renderer.selectedIndices
                 .filter(i => i < hand.length)
                 .sort((a, b) => a - b)
@@ -2926,7 +2981,10 @@ class InputHandler {
                 if (ok) {
                     renderer.selectedIndices = [];
                     renderer._sortHumanHand();
-                    renderer.addMessage(`你叫主: ${cardsCnInput(sel)}`);
+                    const label = renderer.callPhase === 'countering' ? '反主' : '叫主';
+                    renderer.addMessage(`你${label}: ${cardsCnInput(sel)}`);
+                    renderer.callWaitHuman = false;
+                    _startCounterRound(renderer, game, 1);
                 }
             } else {
                 renderer.addMessage('所选牌不能叫主');
@@ -2934,10 +2992,12 @@ class InputHandler {
             return;
         }
 
-        if (btns.pass && _hit(pos, btns.pass)) {
+        if (humanTurn && btns.pass && _hit(pos, btns.pass)) {
             game.processCallTrump(1, null);
             renderer.selectedIndices = [];
             renderer.addMessage('你 Pass');
+            renderer.callWaitHuman = false;
+            _advanceCallTurn(renderer, game);
             return;
         }
     }
@@ -3053,52 +3113,87 @@ function _updateCallTrump(renderer, game) {
 
     if (now < dealEnd) return;
 
-    if (!renderer._aiCallTimes) {
-        renderer._aiCallTimes = {
-            ai0: dealEnd + 1500 + Math.random() * 2000,
-            ai2: dealEnd + 3500 + Math.random() * 2500,
-            ai0Done: false,
-            ai2Done: false,
-        };
+    // Start initial calling round once dealing is done
+    if (renderer.callPhase === 'idle') {
+        renderer.callPhase = 'calling';
+        renderer.callOrder = [];
+        for (let offset = 0; offset < 3; offset++) {
+            renderer.callOrder.push((game.callTrumpIdx + offset) % 3);
+        }
+        _advanceCallTurn(renderer, game);
+        return;
     }
 
-    const times = renderer._aiCallTimes;
+    // Current player
+    const idx = renderer.callCurrent;
 
-    if (!times.ai0Done && now >= times.ai0) {
-        times.ai0Done = true;
-        const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
-        const callCards   = aiDecideCallTrump(game.players[0].hand, currentCall);
-        if (callCards) {
-            const ok = game.processCallTrump(0, callCards);
-            if (ok) {
-                renderer._sortHumanHand();
-                renderer.addMessage(`${game.players[0].name} 叫主: ${cardsCnInput(callCards)}`);
-            }
+    // Human's turn → wait for click
+    if (idx === 1) return;
+
+    // AI's turn → wait for timer
+    if (now < renderer.callAiTime) return;
+
+    // AI decides
+    const player = game.players[idx];
+    const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
+    const call = aiDecideCallTrump(player.hand, currentCall);
+
+    if (renderer.callPhase === 'calling') {
+        if (call && game.processCallTrump(idx, call)) {
+            renderer._sortHumanHand();
+            renderer.addMessage(`${player.name} 叫主: ${cardsCnInput(call)}`);
+            _startCounterRound(renderer, game, idx);
         } else {
-            console.log(`${game.players[0].name} Pass (叫主)`);
+            renderer.addMessage(`${player.name} Pass`);
+            _advanceCallTurn(renderer, game);
+        }
+    } else {
+        if (call && canCounterTrump(call, currentCall) && game.processCallTrump(idx, call)) {
+            renderer._sortHumanHand();
+            renderer.addMessage(`${player.name} 反主: ${cardsCnInput(call)}`);
+            _startCounterRound(renderer, game, idx);
+        } else {
+            renderer.addMessage(`${player.name} Pass`);
+            _advanceCallTurn(renderer, game);
         }
     }
+}
 
-    if (!times.ai2Done && now >= times.ai2) {
-        times.ai2Done = true;
-        const currentCall = game.trumpCaller !== -1 ? game.trumpCallCards : null;
-        const callCards   = aiDecideCallTrump(game.players[2].hand, currentCall);
-        if (callCards) {
-            const ok = game.processCallTrump(2, callCards);
-            if (ok) {
-                renderer._sortHumanHand();
-                renderer.addMessage(`${game.players[2].name} 叫主: ${cardsCnInput(callCards)}`);
-            }
+function _startCounterRound(renderer, game, callerIdx) {
+    renderer.callPhase = 'countering';
+    renderer.callOrder = [];
+    for (let offset = 1; offset <= 2; offset++) {
+        renderer.callOrder.push((callerIdx + offset) % 3);
+    }
+    _advanceCallTurn(renderer, game);
+}
+
+function _advanceCallTurn(renderer, game) {
+    if (renderer.callOrder.length === 0) {
+        if (renderer.callPhase === 'calling' && game.trumpCaller === -1) {
+            game.finishCallTrump();
+            renderer.callPhase = 'idle';
+            renderer._sortHumanHand();
+            renderer.addMessage('无人叫主，常主模式');
+        } else if (renderer.callPhase === 'calling' && game.trumpCaller !== -1) {
+            _startCounterRound(renderer, game, game.trumpCaller);
         } else {
-            console.log(`${game.players[2].name} Pass (叫主)`);
+            game.finishCallTrump();
+            renderer.callPhase = 'idle';
+            renderer._sortHumanHand();
+            renderer.addMessage(game.message);
         }
+        return;
     }
 
-    if (now >= dealEnd + renderer.CALL_WINDOW) {
-        game.finishCallTrump();
-        renderer._aiCallTimes = null;
-        renderer._sortHumanHand();
-        renderer.addMessage(game.message);
+    renderer.callCurrent = renderer.callOrder.shift();
+
+    if (renderer.callCurrent === 1) {
+        renderer.callWaitHuman = true;
+        renderer.selectedIndices = [];
+    } else {
+        renderer.callWaitHuman = false;
+        renderer.callAiTime = Date.now() + 1200;
     }
 }
 
