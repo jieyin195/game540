@@ -266,19 +266,16 @@ export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) 
     }
 
     if (playType === PlayType.BOMB) {
-        // 出炸弹：也可以用炸弹压
-        const bombs = getBombs(hand, trumpSuit);
-        if (bombs.length) {
-            // 找能压的最小炸弹
-            const sortedBombs = [...bombs].sort((a, b) =>
+        const bombsInSuit = getBombs(handInSuit.length >= 4 ? handInSuit : [], trumpSuit);
+        if (bombsInSuit.length) {
+            const sortedBombs = [...bombsInSuit].sort((a, b) =>
                 cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)
             );
             for (const bomb of sortedBombs) {
                 if (doesBeat(bomb, currentBest, trumpSuit)) return bomb;
             }
         }
-        // 无法压：垫最小的4张
-        return _pickDiscard(hand, 4, trumpSuit);
+        return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, 4, trumpSuit);
     }
 
     // 单张
@@ -443,19 +440,80 @@ function _pickSmallestCard(cards, trumpSuit) {
  * @returns {Card[]}
  */
 function _pickDiscard(hand, n, trumpSuit) {
-    // 先取非分牌（按分值0，再按牌力升序）
     const nonScore = [...hand]
-        .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)))
         .filter(c => c.scoreValue() === 0)
+        .sort((a, b) => cardPower(a, trumpSuit) - cardPower(b, trumpSuit))
         .slice(0, n);
 
-    const result = nonScore;
+    const result = [...nonScore];
     if (result.length < n) {
-        // 不足则补分牌（按分值从小到大）
         const scoreCards = hand
             .filter(c => c.scoreValue() > 0)
             .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)));
         result.push(...scoreCards.slice(0, n - result.length));
+    }
+    return result.slice(0, n);
+}
+
+/**
+ * 按"垫最接近相同的牌"原则选垫牌。
+ * 层级：炸弹 > 3同张+1 > 2对 > 1对+2单 > 全单张。
+ * @param {Card[]} pool - 优先取牌池（同花色牌）
+ * @param {Card[]} fullHand - 全部手牌（pool不足时补充）
+ * @param {number} n - 需要的总张数
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function _pickStructuredDiscard(pool, fullHand, n, trumpSuit) {
+    const result = [];
+    const used = new Set();
+
+    const _add = (cards) => { for (const c of cards) { result.push(c); used.add(c); } };
+
+    if (n >= 4) {
+        const bombs = getBombs(pool, trumpSuit);
+        if (bombs.length) {
+            const smallest = bombs.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
+            _add(smallest);
+            return result.slice(0, n);
+        }
+    }
+    if (n >= 3) {
+        const triples = getTriples(pool, trumpSuit);
+        if (triples.length) {
+            const smallest = triples.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
+            _add(smallest);
+        }
+    }
+    if (result.length === 0 && n >= 4) {
+        const pairs = getPairs(pool, trumpSuit);
+        if (pairs.length >= 2) {
+            const sorted = [...pairs].sort((a, b) =>
+                cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit));
+            _add(sorted[0]);
+            _add(sorted[1]);
+        }
+    }
+    if (result.length === 0 && n >= 2) {
+        const pairs = getPairs(pool, trumpSuit);
+        if (pairs.length >= 1) {
+            const smallest = pairs.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
+            _add(smallest);
+        }
+    }
+
+    if (result.length < n) {
+        const remaining = pool.filter(c => !used.has(c));
+        const filler = _pickDiscard(remaining, n - result.length, trumpSuit);
+        _add(filler);
+    }
+    if (result.length < n) {
+        const remaining = fullHand.filter(c => !used.has(c));
+        const filler = _pickDiscard(remaining, n - result.length, trumpSuit);
+        _add(filler);
     }
     return result.slice(0, n);
 }

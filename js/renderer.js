@@ -1032,8 +1032,9 @@ export class GameRenderer {
             const [px, py] = posMap[entry.playerIdx];
             const pname = game.players[entry.playerIdx].name;
             this._fillText(pname, px, py - 20, { size: 14, color: C_GRAY });
-            for (let j = 0; j < entry.cards.length; j++) {
-                this.drawCard(entry.cards[j], px + j * (cardW + 3), py, cardW, cardH);
+            const allCards = entry.allCards();
+            for (let j = 0; j < allCards.length; j++) {
+                this.drawCard(allCards[j], px + j * (cardW + 3), py, cardW, cardH);
             }
         }
 

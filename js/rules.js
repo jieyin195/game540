@@ -511,7 +511,18 @@ export function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
  */
 export function doesBeat(followCards, currentBest, trumpSuit) {
     const followType = getPlayType(followCards, trumpSuit);
-    if (followType === PlayType.BOMB) return true;
+    if (followType === PlayType.BOMB) {
+        if (!currentBest || currentBest.length === 0) return true;
+        const bestType = getPlayType(currentBest, trumpSuit);
+        if (bestType !== PlayType.BOMB) return true;
+        const followIsTrump = followCards.some(c => isTrump(c, trumpSuit));
+        const bestIsTrump   = currentBest.some(c => isTrump(c, trumpSuit));
+        if (followIsTrump && !bestIsTrump) return true;
+        if (!followIsTrump && bestIsTrump) return false;
+        const fp = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
+        const bp = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
+        return fp > bp;
+    }
     if (!currentBest || currentBest.length === 0) return true;
 
     const bestType = getPlayType(currentBest, trumpSuit);
@@ -521,8 +532,8 @@ export function doesBeat(followCards, currentBest, trumpSuit) {
         if (followType !== bestType) return false;
         if (followCards.length !== currentBest.length) return false;
         const followMin = Math.min(...followCards.map(c => cardPower(c, trumpSuit)));
-        const bestMax   = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
-        return followMin > bestMax;
+        const bestMin   = Math.min(...currentBest.map(c => cardPower(c, trumpSuit)));
+        return followMin > bestMin;
     }
 
     const followPower = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
@@ -534,6 +545,147 @@ export function doesBeat(followCards, currentBest, trumpSuit) {
     if (followTrump && !bestTrump) return true;
     if (!followTrump && bestTrump) return false;
     return followPower > bestPower;
+}
+
+// ---------------------------------------------------------------------------
+// Follow structure validation (跟牌牌型匹配)
+// ---------------------------------------------------------------------------
+
+/**
+ * Counts pair groups in cards (by pairKey).
+ * @param {Card[]} cards
+ * @param {string|null} trumpSuit
+ * @returns {Map<string, Card[]>}
+ */
+function _groupCards(cards, trumpSuit) {
+    const groups = new Map();
+    for (const c of cards) {
+        const key = pairKey(c, trumpSuit);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+    }
+    return groups;
+}
+
+/**
+ * Validates that followCards match the required structure for the led play type.
+ * Rule: 出对子→跟对子（有的话），出炸弹→跟炸弹（有的话）。
+ * 无对应牌型时按"垫最接近相同的牌"原则。
+ * Only checks the in-suit portion of followCards.
+ * @param {Card[]} followInSuit - follow cards that are in the led suit
+ * @param {Card[]} handInSuit - hand cards in the led suit
+ * @param {string} ledType - PlayType of the led cards
+ * @param {string|null} trumpSuit
+ * @returns {[boolean, string]}
+ */
+function _validateFollowStructure(followInSuit, handInSuit, ledType, trumpSuit) {
+    if (followInSuit.length <= 1) return [true, ''];
+    if (ledType === PlayType.SINGLE) return [true, ''];
+
+    const followGroups = _groupCards(followInSuit, trumpSuit);
+    const followSizes  = [...followGroups.values()].map(g => g.length).sort((a, b) => b - a);
+
+    if (ledType === PlayType.PAIR) {
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length > 0 && followInSuit.length >= 2) {
+            if (!followSizes.some(s => s >= 2)) return [false, '有对子必须出对子'];
+        }
+        return [true, ''];
+    }
+
+    if (ledType === PlayType.TRIPLE) {
+        const triplesAvail = getTriples(handInSuit, trumpSuit);
+        if (triplesAvail.length > 0 && followInSuit.length >= 3) {
+            if (!followSizes.some(s => s >= 3)) return [false, '有3同张必须出3同张'];
+            return [true, ''];
+        }
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length > 0 && followInSuit.length >= 2) {
+            if (!followSizes.some(s => s >= 2)) return [false, '无3同张但有对子，必须出对子加单张'];
+        }
+        return [true, ''];
+    }
+
+    if (ledType === PlayType.BOMB) {
+        return _validateBombFollowStructure(followInSuit, handInSuit, trumpSuit);
+    }
+
+    if (ledType === PlayType.CONSEC_PAIRS || ledType === PlayType.CONSEC_TRIPLES) {
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length > 0 && followInSuit.length >= 2) {
+            if (!followSizes.some(s => s >= 2)) return [false, '有对子必须出对子'];
+        }
+        return [true, ''];
+    }
+
+    return [true, ''];
+}
+
+/**
+ * Validates bomb-follow structure hierarchy:
+ * 炸弹 > 3同张+1 > 2对 > 1对+2单 > 4单
+ */
+function _validateBombFollowStructure(followInSuit, handInSuit, trumpSuit) {
+    const n = followInSuit.length;
+    if (n < 2) return [true, ''];
+
+    const followGroups = _groupCards(followInSuit, trumpSuit);
+    const followSizes  = [...followGroups.values()].map(g => g.length).sort((a, b) => b - a);
+
+    const bombsAvail   = getBombs(handInSuit, trumpSuit);
+    if (bombsAvail.length > 0 && n >= 4) {
+        const followType = getPlayType(followInSuit, trumpSuit);
+        if (followType !== PlayType.BOMB) return [false, '有同花色炸弹必须出炸弹'];
+        return [true, ''];
+    }
+
+    const triplesAvail = getTriples(handInSuit, trumpSuit);
+    if (triplesAvail.length > 0 && n >= 3) {
+        if (!followSizes.some(s => s >= 3)) return [false, '无炸弹但有3同张，必须出3同张'];
+        return [true, ''];
+    }
+
+    const pairsAvail = getPairs(handInSuit, trumpSuit);
+    if (pairsAvail.length >= 2 && n >= 4) {
+        const pairCount = followSizes.filter(s => s >= 2).length;
+        if (pairCount < 2) return [false, '无3同张但有2对，必须出2对'];
+        return [true, ''];
+    }
+
+    if (pairsAvail.length >= 1 && n >= 2) {
+        if (!followSizes.some(s => s >= 2)) return [false, '有对子必须出对子'];
+    }
+
+    return [true, ''];
+}
+
+// ---------------------------------------------------------------------------
+// Score-discard helper (不能主动垫分牌)
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks that followCards do not voluntarily discard score cards from the pool.
+ * When forced to play score cards, they must be in smallest-score-first order.
+ * @param {Card[]} followCards
+ * @param {Card[]} pool - The available card pool (in-suit or off-suit hand)
+ * @param {string|null} trumpSuit
+ * @returns {[boolean, string]}
+ */
+function _checkNoVoluntaryScore(followCards, pool, trumpSuit) {
+    if (!followCards.some(c => c.scoreValue() > 0)) return [true, ''];
+    const n = followCards.length;
+    const nonScore = pool.filter(c => c.scoreValue() === 0);
+    if (nonScore.length >= n) return [false, '不能主动垫分牌'];
+    const scoreSorter = (a, b) =>
+        a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit);
+    const scorePool = pool.filter(c => c.scoreValue() > 0).sort(scoreSorter);
+    const needScore = n - nonScore.length;
+    const expected  = scorePool.slice(0, needScore);
+    const actual    = followCards.filter(c => c.scoreValue() > 0).sort(scoreSorter);
+    if (actual.length !== expected.length || actual.some((c, i) => c !== expected[i])) {
+        return [false, '垫分牌须按分小牌小顺序'];
+    }
+    return [true, ''];
 }
 
 // ---------------------------------------------------------------------------
@@ -549,14 +701,17 @@ export function doesBeat(followCards, currentBest, trumpSuit) {
  * @param {string|null} trumpSuit
  * @param {boolean} trickHasScore
  * @param {Card[]|null} currentBest
+ * @param {number} [requiredCount] - 被炸后可能大于 ledCards.length
  * @returns {[boolean, string]}
  */
-export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasScore, currentBest) {
+export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasScore, currentBest, requiredCount) {
     const ledType    = getPlayType(ledCards, trumpSuit);
     const followType = getPlayType(followCards, trumpSuit);
     const ledSuit    = getFollowSuit(ledCards, trumpSuit);
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
-    const n = ledCards.length;
+    const n = requiredCount ?? ledCards.length;
+    const bombed = n > ledCards.length;
+    const effectiveLedType = bombed ? PlayType.BOMB : ledType;
 
     // Bombs: 主牌炸弹 can beat any ≤4 cards; 副牌炸弹 can only beat same-suit ≤4 cards
     if (followType === PlayType.BOMB) {
@@ -589,6 +744,15 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
         }
     }
 
+    // Follow structure validation (跟牌牌型匹配：出对子→跟对子等)
+    if (handInSuit.length > 0) {
+        const fInSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
+        if (fInSuit.length > 0) {
+            const [structOk, structErr] = _validateFollowStructure(fInSuit, handInSuit, effectiveLedType, trumpSuit);
+            if (!structOk) return [false, structErr];
+        }
+    }
+
     // 能压必压 rule (must beat if possible, when trick has score)
     if (trickHasScore && currentBest) {
         const canBeat = _canPlayerBeat(hand, currentBest, ledCards, trumpSuit);
@@ -600,22 +764,19 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     }
 
     // Rule: no voluntary score discard (不能主动垫分牌)
-    const followScore = followCards.reduce((sum, c) => sum + c.scoreValue(), 0);
-    if (followScore > 0) {
-        const nonScoreInSuit = handInSuit.filter(c => c.scoreValue() === 0);
-        if (nonScoreInSuit.length >= n) return [false, '不能主动垫分牌'];
-        // 被迫垫分牌时：必须按分小牌小顺序（5分<10分，同分值按牌力小优先）
-        if (nonScoreInSuit.length < n) {
-            const scoreSorter = (a, b) =>
-                a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit);
-            const scoreCardsInSuit = handInSuit.filter(c => c.scoreValue() > 0).sort(scoreSorter);
-            const needScoreCount = n - nonScoreInSuit.length;
-            const expectedScore = scoreCardsInSuit.slice(0, needScoreCount);
-            const actualScore = followCards.filter(c => c.scoreValue() > 0).sort(scoreSorter);
-            if (actualScore.length !== expectedScore.length ||
-                actualScore.some((c, i) => c !== expectedScore[i])) {
-                return [false, '垫分牌须按分小牌小顺序'];
-            }
+    // 分别检查同花色和异花色部分
+    const followInSuit  = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
+    const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
+
+    if (followInSuit.length > 0 && handInSuit.length > 0) {
+        const [ok, err] = _checkNoVoluntaryScore(followInSuit, handInSuit, trumpSuit);
+        if (!ok) return [false, err];
+    }
+    if (followOffSuit.length > 0) {
+        const handOffSuit = hand.filter(c => !handInSuit.includes(c));
+        if (handOffSuit.length > 0) {
+            const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit);
+            if (!ok) return [false, err];
         }
     }
 
@@ -690,6 +851,7 @@ function _pickPadFromPool(pool, n, trumpSuit) {
             return pair;
         }
     }
-    const sorted = [...pool].sort((a, b) => cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
+    const sorted = [...pool].sort((a, b) =>
+        a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
     return sorted.slice(0, n);
 }

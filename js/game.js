@@ -73,11 +73,18 @@ export class TrickEntry {
     constructor(playerIdx, cards) {
         this.playerIdx = playerIdx;
         this.cards     = cards;
+        /** @type {Card[]} */
+        this.padCards  = [];
     }
 
     /** @returns {number} */
     score() {
-        return totalScore(this.cards);
+        return totalScore(this.cards) + totalScore(this.padCards);
+    }
+
+    /** @returns {Card[]} */
+    allCards() {
+        return [...this.cards, ...this.padCards];
     }
 }
 
@@ -123,10 +130,8 @@ export class GameState {
         /** @type {Card[]|null} */
         this.humanSelected   = null;  // 人类选择的牌（由UI填入）
 
-        // 被炸后垫牌状态
-        this.bombPadNeeded   = false;
-        this.bombPadPlayer   = -1;
-        this.bombPadCount    = 0;
+        // 当前一轮每人应出的张数（被炸后变为4）
+        this.trickCardCount  = 0;
 
         // 初始化：发牌（随机决定叫主起始玩家）
         this._deal(Math.floor(Math.random() * 3));
@@ -162,6 +167,7 @@ export class GameState {
         this.mustPlayCards  = [];
         this.callTrumpDone  = false;
         this.currentTrick   = [];
+        this.trickCardCount = 0;
         this.trickWinner    = -1;
         this.allTricksDone  = false;
         this.message        = '叫主阶段：请各玩家决定是否叫主';
@@ -371,6 +377,7 @@ export class GameState {
             // Tag play order on the cards
             cards.forEach((c, i) => { c.playOrder = i; });
 
+            this.trickCardCount = cards.length;
             this.currentTrick.push(new TrickEntry(playerIdx, cards));
             player.removeCards(cards);
             player.hasPlayed = true;
@@ -381,11 +388,13 @@ export class GameState {
             const ledCards    = this.getLedCards();
             const currentBest = this.getCurrentBest();
             const hasScore    = this.trickHasScore();
+            const reqCount    = this.trickCardCount;
 
             if (!skipValidation) {
                 const [ok, err] = validateFollow(
                     cards, ledCards, player.hand,
-                    this.trumpSuit, hasScore, currentBest ?? []
+                    this.trumpSuit, hasScore, currentBest ?? [],
+                    reqCount
                 );
                 if (!ok) return [false, err];
             }
@@ -397,6 +406,35 @@ export class GameState {
             player.hasPlayed = true;
             return [true, ''];
         }
+    }
+
+    /**
+     * Checks if the last play was a bomb and auto-pads previous entries.
+     * Returns array of {playerIdx, padCards} for display, or null.
+     * @returns {Array<{playerIdx: number, padCards: Card[]}>|null}
+     */
+    checkAndProcessBombPad() {
+        if (this.currentTrick.length === 0) return null;
+        const lastEntry = this.currentTrick[this.currentTrick.length - 1];
+        const lastType  = getPlayType(lastEntry.cards, this.trumpSuit);
+        if (lastType !== PlayType.BOMB) return null;
+        if (this.trickCardCount >= 4) return null;
+
+        const results = [];
+        for (const entry of this.currentTrick) {
+            if (entry === lastEntry) continue;
+            const padNeeded = 4 - entry.cards.length - entry.padCards.length;
+            if (padNeeded <= 0) continue;
+
+            const player    = this.players[entry.playerIdx];
+            const padCards  = getPadCards(player.hand, entry.allCards(), this.trumpSuit);
+            const actual    = padCards.slice(0, padNeeded);
+            entry.padCards.push(...actual);
+            player.removeCards(actual);
+            results.push({ playerIdx: entry.playerIdx, padCards: actual });
+        }
+        this.trickCardCount = 4;
+        return results.length > 0 ? results : null;
     }
 
     /**
@@ -418,8 +456,6 @@ export class GameState {
         const trickScore = this.currentTrick.reduce((sum, e) => sum + e.score(), 0);
         this.players[winner].trickScore += trickScore;
         this.trickWinner = winner;
-
-        // Note: bomb-after-bomb padding (炸弹垫牌) is handled by the UI layer.
 
         return winner;
     }

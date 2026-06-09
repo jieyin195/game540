@@ -294,6 +294,15 @@ export class InputHandler {
  * @param {import('./game.js').GameState} game
  */
 function _afterPlay(renderer, game) {
+    // 检测炸弹垫牌
+    const padInfo = game.checkAndProcessBombPad();
+    if (padInfo && padInfo.length > 0) {
+        for (const { playerIdx, padCards } of padInfo) {
+            renderer.addMessage(`${game.players[playerIdx].name} 被炸垫牌: ${cardsCn(padCards)}`);
+        }
+        renderer._sortHumanHand();
+    }
+
     if (!game.isTrickComplete()) return;
 
     const winner     = game.resolveTrick();
@@ -302,9 +311,9 @@ function _afterPlay(renderer, game) {
 
     renderer.addMessage(`${wname} 赢得本轮${trickScore > 0 ? `，得${trickScore}分` : ''}`);
 
-    // Push all played cards to tracker
+    // Push all played cards to tracker (including pad cards)
     for (const entry of game.currentTrick) {
-        renderer.playedCards.push(...entry.cards);
+        renderer.playedCards.push(...entry.allCards());
     }
 
     renderer.showingTrickResult = true;
@@ -522,13 +531,12 @@ function _updatePlay(renderer, game) {
             cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
         }
 
-        // Ensure the AI plays the correct number of cards
-        if (ledCards && cards.length !== ledCards.length) {
-            const needed = ledCards.length;
+        // Ensure the AI plays the correct number of cards (use trickCardCount for bombed tricks)
+        const needed = ledCards ? game.trickCardCount : (cards ? cards.length : 1);
+        if (ledCards && cards.length !== needed) {
             if (cards.length > needed) {
                 cards = cards.slice(0, needed);
             } else {
-                // Pad from the rest of hand
                 const extra = hand.filter(c => !cards.includes(c));
                 cards = [...cards, ...extra].slice(0, needed);
             }
@@ -536,12 +544,11 @@ function _updatePlay(renderer, game) {
 
         // Validate cards are actually in the hand
         cards = cards.filter(c => hand.includes(c));
-        if (cards.length === 0) cards = hand.slice(0, ledCards ? ledCards.length : 1);
+        if (cards.length === 0) cards = hand.slice(0, needed);
 
     } catch (e) {
         console.error('AI decision error:', e);
-        // Fallback: pick first N cards from hand
-        const n = ledCards ? ledCards.length : 1;
+        const n = ledCards ? game.trickCardCount : 1;
         cards = hand.slice(0, n);
     }
 
@@ -553,7 +560,7 @@ function _updatePlay(renderer, game) {
     } else {
         // Fallback: brute-force first N cards
         console.warn(`AI playCards failed (${err}), using fallback`);
-        const n       = ledCards ? ledCards.length : 1;
+        const n       = ledCards ? game.trickCardCount : 1;
         const fbCards = hand.slice(0, Math.min(n, hand.length));
         const [fbOk]  = game.playCards(leader, fbCards, true);
         if (fbOk) {
