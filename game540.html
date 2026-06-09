@@ -254,6 +254,11 @@ function totalScore(cards) {
  * Translated from game_540/rules.py (Python → ES module JS)
  */
 
+    Card, SUITS, SUIT_SPECIAL,
+    RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE,
+    REGULAR_RANK_ORDER, SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS,
+} from './card.js';
+
 // ---------------------------------------------------------------------------
 // Suit priority (used for trump calling tie-breaks)
 // ---------------------------------------------------------------------------
@@ -349,6 +354,7 @@ function bestCardInGroup(cards, trumpSuit) {
 
 /**
  * Returns a grouping key for pairing purposes (handles cross-suit 10s and 2s).
+ * Exported because ai.js uses it directly.
  * @param {Card} card
  * @param {string|null} trumpSuit
  * @returns {string}
@@ -441,6 +447,8 @@ function getBombs(hand, trumpSuit) {
 
 /**
  * Returns the ordering index of a pair within the trump sequence.
+ * Higher = stronger. Returns -1 for non-consecutive pairs.
+ * Exported because ai.js uses it.
  * @param {Array<Card>} pair - A [Card, Card] array
  * @param {string|null} trumpSuit
  * @returns {number}
@@ -451,13 +459,13 @@ function trumpPairOrder(pair, trumpSuit) {
     const suit = card.suit;
 
     if (trumpSuit === null || trumpSuit === undefined) {
+        // 常主模式：只有 3>字牌>大王>小王 可构成连对
+        // 规则：对小王与对10不是连对，对10与对2不是连对
         const orderMap = {
-            [RANK_THREE]:      6,
-            [RANK_CHARACTER]:  5,
-            [RANK_BIG_JOKER]:  4,
-            [RANK_SMALL_JOKER]: 3,
-            '10': 2,
-            '2':  1,
+            [RANK_THREE]:      4,
+            [RANK_CHARACTER]:  3,
+            [RANK_BIG_JOKER]:  2,
+            [RANK_SMALL_JOKER]: 1,
         };
         return orderMap[rank] ?? -1;
     } else {
@@ -529,20 +537,26 @@ function canCallTrump(cards) {
     if (cards.length === 2) {
         const [c1, c2] = cards;
         if (c1.rank === c2.rank &&
-            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(c1.rank))
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(c1.rank)) {
+            if (c1.rank === '10' && c1.suit !== c2.suit) return false;
             return true;
+        }
     }
     if (cards.length === 3) {
         const ranks = cards.map(c => c.rank);
         if (new Set(ranks).size === 1 &&
-            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0]))
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0])) {
+            if (ranks[0] === '10' && new Set(cards.map(c => c.suit)).size !== 1) return false;
             return true;
+        }
     }
     if (cards.length === 4) {
         const ranks = cards.map(c => c.rank);
         if (new Set(ranks).size === 1 &&
-            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0]))
+            ['10', RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER].includes(ranks[0])) {
+            if (ranks[0] === '10' && new Set(cards.map(c => c.suit)).size !== 1) return false;
             return true;
+        }
     }
     return false;
 }
@@ -554,6 +568,7 @@ function canCallTrump(cards) {
  * @returns {boolean}
  */
 function canCounterTrump(newCards, currentCall) {
+    if (newCards.length < 2) return false;
     if (!canCallTrump(newCards)) return false;
     const newN = newCards.length;
     const curN = currentCall.length;
@@ -691,11 +706,12 @@ const _SUIT_CN = {
 };
 
 // ---------------------------------------------------------------------------
-// Validation helpers
+// Validation helpers (internal, but exported for game.js)
 // ---------------------------------------------------------------------------
 
 /**
  * Returns true if the player's hand contains a card that can beat the current best.
+ * Exported because game.js uses it.
  * @param {Card[]} hand
  * @param {Card[]} currentBest
  * @param {Card[]} ledCards
@@ -736,6 +752,7 @@ function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
 
 /**
  * Returns true if followCards beats currentBest.
+ * Renamed from _does_beat; exported because other modules use it.
  * @param {Card[]} followCards
  * @param {Card[]} currentBest
  * @param {string|null} trumpSuit
@@ -745,6 +762,17 @@ function doesBeat(followCards, currentBest, trumpSuit) {
     const followType = getPlayType(followCards, trumpSuit);
     if (followType === PlayType.BOMB) return true;
     if (!currentBest || currentBest.length === 0) return true;
+
+    const bestType = getPlayType(currentBest, trumpSuit);
+
+    // 连对/连三同张：只能被同类型同长度的连对压
+    if (bestType === PlayType.CONSEC_PAIRS || bestType === PlayType.CONSEC_TRIPLES) {
+        if (followType !== bestType) return false;
+        if (followCards.length !== currentBest.length) return false;
+        const followMin = Math.min(...followCards.map(c => cardPower(c, trumpSuit)));
+        const bestMax   = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
+        return followMin > bestMax;
+    }
 
     const followPower = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
     const bestPower   = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
@@ -779,10 +807,17 @@ function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasScore, c
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
     const n = ledCards.length;
 
-    // Bombs can always be played (against plays of <= 4 cards)
+    // Bombs: 主牌炸弹 can beat any ≤4 cards; 副牌炸弹 can only beat same-suit ≤4 cards
     if (followType === PlayType.BOMB) {
-        if (n <= 4) return [true, ''];
-        return [false, '炸弹只能炸4张及以内的牌'];
+        if (n > 4) return [false, '炸弹只能炸4张及以内的牌'];
+        const bombCard = followCards[0];
+        if (!isTrump(bombCard, trumpSuit)) {
+            const bombSuit = getSuitOfCard(bombCard, trumpSuit);
+            if (ledSuit !== bombSuit) {
+                return [false, '副牌炸弹只能炸同花色的牌'];
+            }
+        }
+        return [true, ''];
     }
 
     // Must play the correct number of cards
@@ -813,11 +848,24 @@ function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasScore, c
         }
     }
 
-    // Rule: no voluntary score discard
+    // Rule: no voluntary score discard (不能主动垫分牌)
     const followScore = followCards.reduce((sum, c) => sum + c.scoreValue(), 0);
     if (followScore > 0) {
         const nonScoreInSuit = handInSuit.filter(c => c.scoreValue() === 0);
         if (nonScoreInSuit.length >= n) return [false, '不能主动垫分牌'];
+        // 被迫垫分牌时：必须按分小牌小顺序（5分<10分，同分值按牌力小优先）
+        if (nonScoreInSuit.length < n) {
+            const scoreSorter = (a, b) =>
+                a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit);
+            const scoreCardsInSuit = handInSuit.filter(c => c.scoreValue() > 0).sort(scoreSorter);
+            const needScoreCount = n - nonScoreInSuit.length;
+            const expectedScore = scoreCardsInSuit.slice(0, needScoreCount);
+            const actualScore = followCards.filter(c => c.scoreValue() > 0).sort(scoreSorter);
+            if (actualScore.length !== expectedScore.length ||
+                actualScore.some((c, i) => c !== expectedScore[i])) {
+                return [false, '垫分牌须按分小牌小顺序'];
+            }
+        }
     }
 
     return [true, ''];
@@ -857,30 +905,42 @@ function getPadCards(hand, originalPlay, trumpSuit) {
     if (nPad <= 0) return [];
 
     const available = hand.filter(c => !originalPlay.includes(c));
-    let pad = [];
 
-    if (originalPlay.length === 1) {
-        const triples = getTriples(available, trumpSuit);
-        if (triples.length > 0) {
-            pad = triples[0].slice(0, 3);
-        } else {
-            const pairs = getPairs(available, trumpSuit);
-            if (pairs.length > 0) {
-                const pair = [...pairs[0]];
-                const remaining = available.filter(c => !pair.includes(c));
-                if (remaining.length > 0) pad = [...pair, remaining[0]];
-                else pad = pair;
-            } else {
-                pad = available.slice(0, 3);
-            }
-        }
-    } else if (originalPlay.length === 2) {
-        const pairs = getPairs(available, trumpSuit);
-        if (pairs.length > 0) pad = [...pairs[0]];
-        else pad = available.slice(0, 2);
+    // 按花色优先级筛选垫牌池
+    const ledCard = originalPlay[0];
+    let preferred, other;
+    if (isTrump(ledCard, trumpSuit)) {
+        preferred = available.filter(c => isTrump(c, trumpSuit));
+    } else {
+        preferred = available.filter(c => c.suit === ledCard.suit && !isTrump(c, trumpSuit));
     }
+    other = available.filter(c => !preferred.includes(c));
 
+    let pad = _pickPadFromPool(preferred, nPad, trumpSuit);
+    if (pad.length < nPad) {
+        pad = pad.concat(_pickPadFromPool(other, nPad - pad.length, trumpSuit));
+    }
     return pad.slice(0, nPad);
+}
+
+function _pickPadFromPool(pool, n, trumpSuit) {
+    if (!pool.length || n <= 0) return [];
+    if (n >= 3) {
+        const triples = getTriples(pool, trumpSuit);
+        if (triples.length > 0) return triples[0].slice(0, 3);
+    }
+    if (n >= 2) {
+        const pairs = getPairs(pool, trumpSuit);
+        if (pairs.length > 0) {
+            const pair = [...pairs[0]];
+            if (n === 2) return pair;
+            const remaining = pool.filter(c => !pair.includes(c));
+            if (remaining.length > 0) return [...pair, remaining[0]];
+            return pair;
+        }
+    }
+    const sorted = [...pool].sort((a, b) => cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
+    return sorted.slice(0, n);
 }
 
 // =========================================================================
@@ -892,6 +952,14 @@ function getPadCards(hand, originalPlay, trumpSuit) {
  *
  * Translated from game_540/game.py (Python → ES module JS)
  */
+
+    isTrump, cardPower, getPlayType, PlayType,
+    canCallTrump, canCounterTrump,
+    getFollowSuit, filterHandBySuit,
+    getPairs, getTriples, getBombs,
+    mustLeadPairOrBiggest, getPadCards,
+    validateFollow, doesBeat, _canPlayerBeat,
+} from './rules.js';
 
 // ---------------------------------------------------------------------------
 // 游戏阶段
@@ -989,6 +1057,10 @@ class GameState {
         /** @type {string|null} */
         this.pendingAction   = null;  // AI待执行动作
 
+        // 反主牌必出：反主成功后这些牌必须在第一次领出时打出
+        /** @type {Card[]} */
+        this.mustPlayCards   = [];
+
         // 叫主阶段状态
         this.callTrumpIdx    = 0;     // 当前正在决定是否叫主的玩家
         this.callTrumpDone   = false;
@@ -1013,7 +1085,8 @@ class GameState {
 
     /**
      * Deals a fresh game. Resets all per-game state.
-     * @param {number} [startFrom=-1]
+     * @param {number} [startFrom=-1]  Index of the player who calls trump first;
+     *                                  if negative, chosen randomly.
      */
     _deal(startFrom = -1) {
         if (startFrom < 0) startFrom = Math.floor(Math.random() * 3);
@@ -1029,10 +1102,11 @@ class GameState {
 
         this.phase          = Phase.CALL_TRUMP;
         this.callTrumpIdx   = startFrom;
-        this.callTrumpCount = 0;
+        this.callTrumpCount = 0;         // 已决定的玩家数
         this.trumpSuit      = null;
         this.trumpCaller    = -1;
         this.trumpCallCards = [];
+        this.mustPlayCards  = [];
         this.callTrumpDone  = false;
         this.currentTrick   = [];
         this.trickWinner    = -1;
@@ -1046,6 +1120,8 @@ class GameState {
 
     /**
      * Preemptive trump-calling: any player may call/counter at any time.
+     * callCards === null means this player passes.
+     * Returns true if the action succeeded (pass always succeeds; invalid call returns false).
      * @param {number}      playerIdx
      * @param {Card[]|null} callCards
      * @returns {boolean}
@@ -1057,6 +1133,7 @@ class GameState {
             if (canCallTrump(callCards)) {
                 this.trumpCaller    = playerIdx;
                 this.trumpCallCards = callCards;
+                this.mustPlayCards  = [...callCards];
                 this.trumpSuit      = this._extractTrumpSuit(callCards);
                 this.message        = `${this.players[playerIdx].name} 叫主`;
                 return true;
@@ -1066,6 +1143,7 @@ class GameState {
             if (canCounterTrump(callCards, this.trumpCallCards)) {
                 this.trumpCaller    = playerIdx;
                 this.trumpCallCards = callCards;
+                this.mustPlayCards  = [...callCards];
                 this.trumpSuit      = this._extractTrumpSuit(callCards);
                 this.message        = `${this.players[playerIdx].name} 反主`;
                 return true;
@@ -1083,6 +1161,7 @@ class GameState {
 
     /**
      * Extracts the active trump suit from calling cards.
+     * Returns null when calling with specials (jokers, character, 3).
      * @param {Card[]} cards
      * @returns {string|null}
      */
@@ -1090,13 +1169,14 @@ class GameState {
         for (const c of cards) {
             if (c.suit !== 'special' && c.rank === '10') return c.suit;
         }
-        return null;
+        return null; // 叫的是王/字牌/3，无活主花色
     }
 
     /** @private */
     _finishCallTrump() {
         this.callTrumpDone = true;
         this.phase         = Phase.PLAY;
+        // 先出牌者：叫主者（若无人叫主则叫主起始玩家）
         this.firstPlayer   = Math.max(this.trumpCaller, 0);
         this._startTrick(this.firstPlayer);
 
@@ -1128,17 +1208,19 @@ class GameState {
 
     /**
      * Returns the index of the player who should play next this trick.
+     * Returns -1 when the trick is already complete.
      * @returns {number}
      */
     whoLeads() {
         if (this.currentTrick.length === 0) return this.firstPlayer;
 
+        // Follow order: players after firstPlayer in cyclic order
         const played = new Set(this.currentTrick.map(e => e.playerIdx));
         for (let offset = 1; offset <= 2; offset++) {
             const idx = (this.firstPlayer + offset) % 3;
             if (!played.has(idx)) return idx;
         }
-        return -1;
+        return -1; // 本轮已结束
     }
 
     /** @returns {boolean} */
@@ -1177,6 +1259,7 @@ class GameState {
 
     /**
      * Attempts to play cards for a player.
+     * Returns [success: boolean, errorMessage: string].
      * @param {number}   playerIdx
      * @param {Card[]}   cards
      * @param {boolean}  [skipValidation=false]
@@ -1185,6 +1268,7 @@ class GameState {
     playCards(playerIdx, cards, skipValidation = false) {
         const player = this.players[playerIdx];
 
+        // Verify every card is in the player's hand (by reference)
         for (const c of cards) {
             if (!player.hand.includes(c)) return [false, `手中没有这张牌: ${c}`];
         }
@@ -1194,12 +1278,25 @@ class GameState {
             const playType = getPlayType(cards, this.trumpSuit);
             if (playType === PlayType.INVALID) return [false, '无效出牌'];
 
+            // 反主牌必出规则：反主的牌必须在领出时打出
+            if (this.mustPlayCards.length > 0 && playerIdx === this.trumpCaller && !skipValidation) {
+                for (const mc of this.mustPlayCards) {
+                    if (!cards.includes(mc)) {
+                        return [false, '必须出反主的牌'];
+                    }
+                }
+                this.mustPlayCards = [];
+            }
+
+            // First-play rule: if any other player hasn't played yet, must lead a pair
+            // (or the biggest single if no pairs exist)
             const anyUnplayed = this.players.some(
                 (p, i) => i !== playerIdx && !p.hasPlayed
             );
             if (anyUnplayed && !skipValidation) {
                 const pairs = getPairs(player.hand, this.trumpSuit);
                 if (pairs.length > 0) {
+                    // Must play a pair-based type
                     const pairTypes = [
                         PlayType.PAIR, PlayType.CONSEC_PAIRS,
                         PlayType.TRIPLE, PlayType.CONSEC_TRIPLES,
@@ -1209,6 +1306,7 @@ class GameState {
                         return [false, '有玩家未出过牌，必须出对子（或连对等）'];
                     }
                 } else {
+                    // No pairs — must play the biggest single
                     if (playType !== PlayType.SINGLE) return [false, '无对子时必须出单张'];
                     const best = player.hand.reduce((b, c) =>
                         cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
@@ -1217,6 +1315,7 @@ class GameState {
                 }
             }
 
+            // Tag play order on the cards
             cards.forEach((c, i) => { c.playOrder = i; });
 
             this.currentTrick.push(new TrickEntry(playerIdx, cards));
@@ -1249,6 +1348,7 @@ class GameState {
 
     /**
      * Resolves the current trick: determines the winner and awards score.
+     * Returns the winner's player index, or -1 if the trick is not yet complete.
      * @returns {number}
      */
     resolveTrick() {
@@ -1266,11 +1366,14 @@ class GameState {
         this.players[winner].trickScore += trickScore;
         this.trickWinner = winner;
 
+        // Note: bomb-after-bomb padding (炸弹垫牌) is handled by the UI layer.
+
         return winner;
     }
 
     /**
      * Clears the current trick and starts a new one led by the previous winner.
+     * Sets allTricksDone + phase = GAME_END when all hands are empty.
      */
     startNextTrick() {
         const winner      = this.trickWinner;
@@ -1285,6 +1388,7 @@ class GameState {
 
     /**
      * Returns the delta score for each player relative to the 180-point baseline.
+     * Positive = won that many points; negative = lost that many.
      * @returns {number[]} [delta0, delta1, delta2]
      */
     calculateFinalScores() {
@@ -1293,7 +1397,8 @@ class GameState {
     }
 
     /**
-     * Resets the game (re-deals).
+     * Resets the game (re-deals). The winner of the last complete game leads
+     * the trump-calling phase; otherwise a random player is chosen.
      */
     reset() {
         let startFrom;
@@ -1319,12 +1424,22 @@ class GameState {
  * Translated from game_540/ai.py (Python → ES module JS)
  */
 
+    cardPower, isTrump, getPlayType, PlayType,
+    canCallTrump, canCounterTrump,
+    getPairs, getTriples, getBombs,
+    getFollowSuit, filterHandBySuit,
+    doesBeat, _canPlayerBeat,
+    isConsecutivePairs, pairKey, trumpPairOrder,
+    validateFollow,
+} from './rules.js';
+
 // ---------------------------------------------------------------------------
 // 叫主 AI
 // ---------------------------------------------------------------------------
 
 /**
  * AI决定是否叫主/反主。
+ * 返回叫主用的牌列表，或 null（Pass）。
  * @param {Card[]} hand
  * @param {Card[]|null} currentCall
  * @returns {Card[]|null}
@@ -1333,6 +1448,7 @@ function aiDecideCallTrump(hand, currentCall) {
     const candidates = _findCallCandidates(hand);
     if (!candidates.length) return null;
 
+    // 按叫主强度排序（张数多优先，然后点数大优先）
     candidates.sort((a, b) => {
         const lenDiff = b.length - a.length;
         if (lenDiff !== 0) return lenDiff;
@@ -1364,10 +1480,20 @@ function _findCallCandidates(hand) {
     }
 
     for (const [rank, cards] of Object.entries(groups)) {
-        if (rank === '10' && cards.length >= 1) {
-            candidates.push([cards[0]]);
-        }
-        if ([`10`, RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(rank)) {
+        if (rank === '10') {
+            // 10必须按花色分组，不同花色不能混用
+            const suitGroups = {};
+            for (const c of cards) {
+                if (!suitGroups[c.suit]) suitGroups[c.suit] = [];
+                suitGroups[c.suit].push(c);
+            }
+            for (const suitCards of Object.values(suitGroups)) {
+                if (suitCards.length >= 1) candidates.push([suitCards[0]]);
+                if (suitCards.length >= 2) candidates.push(suitCards.slice(0, 2));
+                if (suitCards.length >= 3) candidates.push(suitCards.slice(0, 3));
+                if (suitCards.length >= 4) candidates.push(suitCards.slice(0, 4));
+            }
+        } else if ([RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE].includes(rank)) {
             if (cards.length >= 2) candidates.push(cards.slice(0, 2));
             if (cards.length >= 3) candidates.push(cards.slice(0, 3));
             if (cards.length >= 4) candidates.push(cards.slice(0, 4));
@@ -1402,13 +1528,20 @@ function _callPower(cards) {
  * AI领出牌决策。
  * @param {Card[]} hand
  * @param {string|null} trumpSuit
- * @param {boolean} anyUnplayed
+ * @param {boolean} anyUnplayed - 是否有玩家未出过牌（影响必须出对子规则）
  * @returns {Card[]}
  */
-function aiLead(hand, trumpSuit, anyUnplayed) {
+function aiLead(hand, trumpSuit, anyUnplayed, mustPlayCards = null) {
+    // 反主牌必出：直接出这些牌
+    if (mustPlayCards && mustPlayCards.length > 0) {
+        return [...mustPlayCards];
+    }
+
     if (anyUnplayed) {
+        // 有玩家未出过牌：必须出对子（或无对子时最大单张）
         const pairs = getPairs(hand, trumpSuit);
         if (pairs.length) {
+            // 优先出非主牌的分值对子，次选主牌对子
             const nonTrumpScorePairs = pairs.filter(
                 p => !isTrump(p[0], trumpSuit) && p[0].scoreValue() > 0
             );
@@ -1418,22 +1551,27 @@ function aiLead(hand, trumpSuit, anyUnplayed) {
                 );
                 return [...best];
             }
+            // 无分值对子，出最小对子
             const best = pairs.reduce((a, b) =>
                 cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
             );
             return [...best];
         } else {
+            // 无对子，出最大单张
             return [hand.reduce((a, b) =>
                 cardPower(a, trumpSuit) > cardPower(b, trumpSuit) ? a : b
             )];
         }
     }
 
+    // 所有玩家都出过牌，可自由出
+    // 策略：优先出连对（带分），其次出对子，最后出单张
     const consec = _findBestConsecutivePairs(hand, trumpSuit);
     if (consec) return consec;
 
     const pairs = getPairs(hand, trumpSuit);
     if (pairs.length) {
+        // 出最有价值的对子（非分牌配对）
         const scoredPairs = pairs.filter(p => p[0].scoreValue() > 0 || p[1].scoreValue() > 0);
         let best;
         if (scoredPairs.length) {
@@ -1441,6 +1579,7 @@ function aiLead(hand, trumpSuit, anyUnplayed) {
                 cardPower(a[0], trumpSuit) > cardPower(b[0], trumpSuit) ? a : b
             );
         } else {
+            // 出最大对子（进攻）
             best = pairs.reduce((a, b) =>
                 cardPower(a[0], trumpSuit) > cardPower(b[0], trumpSuit) ? a : b
             );
@@ -1448,6 +1587,7 @@ function aiLead(hand, trumpSuit, anyUnplayed) {
         return [...best];
     }
 
+    // 无对子：出最大非分单张，或最大单张
     const nonScore = hand.filter(c => c.scoreValue() === 0);
     if (nonScore.length) {
         return [nonScore.reduce((a, b) =>
@@ -1473,9 +1613,11 @@ function _findBestConsecutivePairs(hand, trumpSuit) {
         groups[key].push(c);
     }
 
+    // 找所有成对的组
     const pairGroups = Object.entries(groups).filter(([k, g]) => g.length >= 2);
     if (pairGroups.length < 2) return null;
 
+    // 找连续的对子序列
     const pairWithOrder = [];
     for (const [k, g] of pairGroups) {
         const order = trumpPairOrder([g[0], g[1]], trumpSuit);
@@ -1488,6 +1630,7 @@ function _findBestConsecutivePairs(hand, trumpSuit) {
 
     pairWithOrder.sort((a, b) => a[0] - b[0]);
 
+    // 找最长连续段
     let bestSeq = [];
     let currentSeq = [pairWithOrder[0]];
     for (let i = 1; i < pairWithOrder.length; i++) {
@@ -1526,10 +1669,12 @@ function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
     const ledSuit = getFollowSuit(ledCards, trumpSuit);
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
 
+    // 可用牌：优先用本花色牌（计算用，实际分支内处理）
     const available = handInSuit.length ? handInSuit : hand;
 
     const playType = getPlayType(ledCards, trumpSuit);
 
+    // 如果是对子/连对，尝试出对应牌型
     if (playType === PlayType.PAIR || playType === PlayType.CONSEC_PAIRS) {
         return _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n);
     }
@@ -1539,8 +1684,10 @@ function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
     }
 
     if (playType === PlayType.BOMB) {
+        // 出炸弹：也可以用炸弹压
         const bombs = getBombs(hand, trumpSuit);
         if (bombs.length) {
+            // 找能压的最小炸弹
             const sortedBombs = [...bombs].sort((a, b) =>
                 cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)
             );
@@ -1548,14 +1695,22 @@ function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
                 if (doesBeat(bomb, currentBest, trumpSuit)) return bomb;
             }
         }
+        // 无法压：垫最小的4张
         return _pickDiscard(hand, 4, trumpSuit);
     }
 
+    // 单张
     return _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore);
 }
 
 /**
  * 跟单张牌
+ * @param {Card[]} hand
+ * @param {Card[]} ledCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @returns {Card[]}
  */
 function _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
     const ledSuit = getFollowSuit(ledCards, trumpSuit);
@@ -1563,6 +1718,7 @@ function _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
 
     if (handInSuit.length) {
         if (trickHasScore) {
+            // 能压必压：找最小的能压的牌
             const canBeatCards = handInSuit.filter(c => doesBeat([c], currentBest, trumpSuit));
             if (canBeatCards.length) {
                 return [canBeatCards.reduce((a, b) =>
@@ -1570,8 +1726,10 @@ function _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
                 )];
             }
         }
+        // 垫牌：出最小（优先非分牌）
         return [_pickSmallestCard(handInSuit, trumpSuit)];
     } else {
+        // 无该花色：可用主牌压，或垫牌
         if (trickHasScore) {
             const trumpInHand = hand.filter(c => isTrump(c, trumpSuit));
             const canBeat = trumpInHand.filter(c => doesBeat([c], currentBest, trumpSuit));
@@ -1581,12 +1739,20 @@ function _followSingle(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
                 )];
             }
         }
+        // 垫牌
         return [_pickSmallestCard(hand, trumpSuit)];
     }
 }
 
 /**
  * 跟对子/连对
+ * @param {Card[]} hand
+ * @param {Card[]} ledCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @param {number} n
+ * @returns {Card[]}
  */
 function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) {
     const ledSuit = getFollowSuit(ledCards, trumpSuit);
@@ -1596,22 +1762,27 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
     const numPairsNeeded = Math.floor(n / 2);
 
     if (pairsInSuit.length >= numPairsNeeded) {
+        // 有足够对子
         if (trickHasScore) {
+            // 尝试压牌
             const canBeat = pairsInSuit.filter(p =>
                 doesBeat([...p], currentBest.slice(0, 2), trumpSuit)
             );
             if (canBeat.length) {
+                // 用最小能压的对子
                 const bestPair = canBeat.reduce((a, b) =>
                     cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
                 );
                 return [...bestPair];
             }
         }
+        // 垫最小对子
         const smallest = pairsInSuit.reduce((a, b) =>
             cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
         );
         return [...smallest];
     } else {
+        // 对子不足，能出几对就出几对，剩余用单张补
         const result = [];
         const usedCards = new Set();
         for (const pair of pairsInSuit) {
@@ -1635,6 +1806,14 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
 
 /**
  * 跟3同张
+ * @param {Card[]} hand
+ * @param {Card[]} ledCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @param {number} n
+ * @param {number} sameCount
+ * @returns {Card[]}
  */
 function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, sameCount) {
     const ledSuit = getFollowSuit(ledCards, trumpSuit);
@@ -1655,11 +1834,15 @@ function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 
         );
     }
 
+    // 无3同张：用对子+单张或3单张
     return _pickDiscard(handInSuit.length ? handInSuit : hand, n, trumpSuit);
 }
 
 /**
  * 选最小的牌（优先非分牌）
+ * @param {Card[]} cards
+ * @param {string|null} trumpSuit
+ * @returns {Card}
  */
 function _pickSmallestCard(cards, trumpSuit) {
     const nonScore = cards.filter(c => c.scoreValue() === 0);
@@ -1671,8 +1854,14 @@ function _pickSmallestCard(cards, trumpSuit) {
 
 /**
  * 选n张垫牌（不能主动垫分牌）。
+ * 优先垫最小非分牌，不足时才垫分牌（按分小牌小顺序）。
+ * @param {Card[]} hand
+ * @param {number} n
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
  */
 function _pickDiscard(hand, n, trumpSuit) {
+    // 先取非分牌（按分值0，再按牌力升序）
     const nonScore = [...hand]
         .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)))
         .filter(c => c.scoreValue() === 0)
@@ -1680,6 +1869,7 @@ function _pickDiscard(hand, n, trumpSuit) {
 
     const result = nonScore;
     if (result.length < n) {
+        // 不足则补分牌（按分值从小到大）
         const scoreCards = hand
             .filter(c => c.scoreValue() > 0)
             .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)));
@@ -1697,6 +1887,13 @@ function _pickDiscard(hand, n, trumpSuit) {
  *
  * Translated from game_540/ui.py (pygame → HTML5 Canvas 2D)
  */
+
+    SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS, SUIT_SPECIAL,
+    RANK_DISPLAY,
+} from './card.js';
+    isTrump, cardPower, canCallTrump, canCounterTrump,
+    getPairs, PlayType, getPlayType,
+} from './rules.js';
 
 // ---------------------------------------------------------------------------
 // Color constants
@@ -1766,7 +1963,7 @@ function cardsCn(cards) {
 class GameRenderer {
     /**
      * @param {HTMLCanvasElement} canvas
-     * @param {GameState} game
+     * @param {import('./game.js').GameState} game
      */
     constructor(canvas, game) {
         this.canvas = canvas;
@@ -1786,7 +1983,7 @@ class GameRenderer {
         this.aiActionTime = 0;
         this.aiDelay      = 900; // ms
 
-        /** @type {Card[]} */
+        /** @type {import('./card.js').Card[]} */
         this.playedCards  = [];
         this.showTracker  = false;
 
@@ -1800,10 +1997,10 @@ class GameRenderer {
 
         // 叫主轮询状态
         this.callPhase        = 'idle';  // 'idle' | 'calling' | 'countering'
-        this.callOrder        = [];
-        this.callCurrent      = -1;
-        this.callWaitHuman    = false;
-        this.callAiTime       = 0;
+        this.callOrder        = [];      // 待询问的玩家索引队列
+        this.callCurrent      = -1;      // 当前正在决定的玩家索引
+        this.callWaitHuman    = false;   // 等待人类决定
+        this.callAiTime       = 0;       // AI决定的时间戳
 
         /** @type {Object<string,{x:number,y:number,w:number,h:number}>} */
         this._buttonRects = {};
@@ -1887,16 +2084,19 @@ class GameRenderer {
     // ------------------------------------------------------------------
     drawCardBack(x, y, w, h) {
         const ctx = this.ctx;
+        // Outer
         this._roundRect(x, y, w, h, 6);
         ctx.fillStyle = C_CARD_BACK;
         ctx.fill();
         ctx.strokeStyle = '#b4c8f0';
         ctx.lineWidth   = 2;
         ctx.stroke();
+        // Inner rect
         const m = Math.round(w * 0.06);
         this._roundRect(x + m, y + m, w - 2 * m, h - 2 * m, 4);
         ctx.fillStyle = '#285aaa';
         ctx.fill();
+        // Diamond pattern (4 circles)
         const cx = x + w / 2;
         const cy = y + h / 2;
         const dd = Math.round(w * 0.21);
@@ -1915,7 +2115,7 @@ class GameRenderer {
         const ctx = this.ctx;
         const cx  = x + w / 2;
         const cy  = y + h / 2;
-        const s   = w / 68;
+        const s   = w / 68; // scale factor relative to original CARD_W=68
 
         let bg, fg, accent, label;
         if (isBig) {
@@ -1924,6 +2124,7 @@ class GameRenderer {
             bg = '#1e1e32'; fg = C_WHITE; accent = '#b4b4c8'; label = '小王';
         }
 
+        // Background
         this._roundRect(x, y, w, h, 6);
         ctx.fillStyle = bg;
         ctx.fill();
@@ -1931,6 +2132,7 @@ class GameRenderer {
         ctx.lineWidth   = 2;
         ctx.stroke();
 
+        // Crown polygon (7 points, scaled)
         const crownCx = cx;
         const crownCy = cy - 14 * s;
         const crownW  = 28 * s;
@@ -1945,6 +2147,7 @@ class GameRenderer {
             [crownCx + crownW,     crownCy + crownH],
         ];
 
+        // Fill crown
         ctx.beginPath();
         ctx.moveTo(pts[0][0], pts[0][1]);
         for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
@@ -1955,6 +2158,7 @@ class GameRenderer {
         ctx.lineWidth   = 1;
         ctx.stroke();
 
+        // Jewels on crown tips
         const jewels = [
             [crownCx - crownW, crownCy],
             [crownCx,          crownCy + crownH / 4],
@@ -1967,11 +2171,13 @@ class GameRenderer {
             ctx.fill();
         }
 
+        // "JOKER" text
         this._fillText('JOKER', cx, cy + 16 * s, {
             size: Math.round(14 * s), color: fg, center: true,
             font: '"Segoe UI", Arial, sans-serif',
         });
 
+        // Corner label
         this._fillText(label, x + 3 * s, y + 3 * s, {
             size: Math.round(13 * s), color: fg, bold: true,
         });
@@ -1993,6 +2199,7 @@ class GameRenderer {
             bgColor = '#e6dcff'; centerText = '字牌'; cornerText = '字';
         }
 
+        // Background
         this._roundRect(x, y, w, h, 6);
         ctx.fillStyle = bgColor;
         ctx.fill();
@@ -2000,14 +2207,17 @@ class GameRenderer {
         ctx.lineWidth   = 2;
         ctx.stroke();
 
+        // Center text
         this._fillText(centerText, cx, cy - 10 * s, {
             size: Math.round(20 * s), color: C_PURPLE, bold: true, center: true,
         });
 
+        // Corner label
         this._fillText(cornerText, x + 3 * s, y + 3 * s, {
             size: Math.round(14 * s), color: C_PURPLE, bold: true,
         });
 
+        // Second character for 字牌
         if (rank !== '3') {
             this._fillText('牌', x + 3 * s, y + 3 * s + 16 * s, {
                 size: Math.round(14 * s), color: C_PURPLE, bold: true,
@@ -2018,6 +2228,17 @@ class GameRenderer {
     // ------------------------------------------------------------------
     // Main card drawing dispatcher
     // ------------------------------------------------------------------
+    /**
+     * @param {import('./card.js').Card|null} card
+     * @param {number} x
+     * @param {number} y
+     * @param {number} w
+     * @param {number} h
+     * @param {boolean} faceUp
+     * @param {boolean} selected
+     * @param {boolean} highlightCall
+     * @returns {{x:number,y:number,w:number,h:number}}
+     */
     drawCard(card, x, y, w, h, faceUp = true, selected = false, highlightCall = false) {
         const ctx = this.ctx;
 
@@ -2029,6 +2250,7 @@ class GameRenderer {
         const rank = card.rank;
         const suit = card.suit;
 
+        // Special cards
         if (suit === SUIT_SPECIAL) {
             if (rank === 'big_joker') {
                 this.drawJoker(x, y, w, h, true);
@@ -2037,6 +2259,7 @@ class GameRenderer {
             } else {
                 this.drawSpecialPlain(x, y, w, h, rank);
             }
+            // Selection border overlay
             if (selected) {
                 this._roundRect(x, y, w, h, 6);
                 ctx.strokeStyle = C_CARD_SEL;
@@ -2046,11 +2269,13 @@ class GameRenderer {
             return { x, y, w, h };
         }
 
+        // Regular card
         const color    = SUIT_COLOR_MAP[suit] || C_BLACK;
         const sym      = SUIT_SYMBOL[suit]    || '';
         const rankStr  = RANK_DISPLAY[rank]   || rank;
-        const s        = w / 68;
+        const s        = w / 68; // scale factor
 
+        // Background
         let bg;
         if (selected) {
             bg = C_CARD_SEL;
@@ -2070,6 +2295,7 @@ class GameRenderer {
         ctx.lineWidth   = bw;
         ctx.stroke();
 
+        // Top-left corner: rank + suit
         const rankFontSize = Math.round(15 * s);
         const suitFontSize = Math.round(18 * s);
         this._fillText(rankStr, x + 4 * s, y + 3 * s, {
@@ -2079,6 +2305,7 @@ class GameRenderer {
             size: suitFontSize, color,
         });
 
+        // Center: large suit symbol + rank text
         const cSuitSize = Math.round(38 * s);
         const cRankSize = Math.round(22 * s);
         this._fillText(sym, x + w / 2, y + h / 2 - 14 * s - cSuitSize / 2, {
@@ -2092,8 +2319,16 @@ class GameRenderer {
     }
 
     // ------------------------------------------------------------------
-    // Hand drawing: horizontal
+    // Hand drawing: horizontal (for top AI and bottom human)
     // ------------------------------------------------------------------
+    /**
+     * @param {import('./card.js').Card[]} cards
+     * @param {number} areaX
+     * @param {number} areaY
+     * @param {number} areaW
+     * @param {Object} options
+     * @returns {{x:number,y:number,w:number,h:number}[]}
+     */
     drawHandHorizontal(cards, areaX, areaY, areaW, options = {}) {
         const {
             faceUp = true,
@@ -2135,7 +2370,7 @@ class GameRenderer {
     }
 
     // ------------------------------------------------------------------
-    // Hand drawing: vertical
+    // Hand drawing: vertical (for left AI)
     // ------------------------------------------------------------------
     drawHandVertical(cards, areaX, areaY, areaH) {
         const n = cards.length;
@@ -2156,6 +2391,9 @@ class GameRenderer {
     // ------------------------------------------------------------------
     // Button
     // ------------------------------------------------------------------
+    /**
+     * @returns {{x:number,y:number,w:number,h:number}}
+     */
     drawButton(text, x, y, w, h, color = C_BTN_GREEN, enabled = true) {
         const ctx = this.ctx;
         const col = enabled ? color : C_BTN_GRAY;
@@ -2176,7 +2414,7 @@ class GameRenderer {
     }
 
     // ------------------------------------------------------------------
-    // Panel
+    // Panel (dark green rounded rect)
     // ------------------------------------------------------------------
     drawPanel(area) {
         const ctx = this.ctx;
@@ -2211,6 +2449,7 @@ class GameRenderer {
             });
             y += 22;
 
+            // Progress bar
             const barW = area.w - 24;
             this._roundRect(x, y, barW, 10, 4);
             ctx.fillStyle = C_DARK_GRAY;
@@ -2224,6 +2463,7 @@ class GameRenderer {
                 ctx.fill();
             }
 
+            // Baseline marker at 180
             const baseX = x + Math.round(barW * 180 / 360);
             ctx.beginPath();
             ctx.moveTo(baseX, y - 2);
@@ -2262,6 +2502,7 @@ class GameRenderer {
             y += 20;
         }
 
+        // Remaining cards
         y = area.y + area.h - 110;
         for (const p of game.players) {
             const name = p.isHuman ? '你' : p.name;
@@ -2292,6 +2533,7 @@ class GameRenderer {
         const W = this.canvas.width;
         const H = this.canvas.height;
 
+        // Semi-transparent overlay
         ctx.fillStyle = 'rgba(0, 0, 0, 0.67)';
         ctx.fillRect(0, 0, W, H);
 
@@ -2326,6 +2568,7 @@ class GameRenderer {
             y += 58;
         }
 
+        // Winner
         let wi = 0;
         for (let i = 1; i < 3; i++) {
             if (game.players[i].trickScore > game.players[wi].trickScore) wi = i;
@@ -2335,6 +2578,7 @@ class GameRenderer {
             size: 28, color: C_GOLD, bold: true, center: true,
         });
 
+        // Restart button
         const rbw = Math.min(220, bw * 0.4);
         const rbh = 54;
         const rbx = cx - rbw / 2;
@@ -2350,6 +2594,7 @@ class GameRenderer {
         const W = this.canvas.width;
         const H = this.canvas.height;
 
+        // Overlay
         ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
         ctx.fillRect(0, 0, W, H);
 
@@ -2369,6 +2614,7 @@ class GameRenderer {
         this._fillText('记牌器', cxBox, by + 16, { size: 22, color: C_GOLD, bold: true, center: true });
         this._fillText('点击任意处关闭', bx + pw - 120, by + 8, { size: 12, color: C_GRAY });
 
+        // Count played cards
         const playedCnt = {};
         for (const card of this.playedCards) {
             const key = `${card.suit}_${card.rank}`;
@@ -2378,6 +2624,7 @@ class GameRenderer {
         const TRACK_RANKS = ['A', 'K', 'Q', 'J', '5'];
         const TOTAL_PER   = 4;
 
+        // Column headers
         const colLabels = ['花色', 'A', 'K', 'Q', 'J', '5'];
         const colXs     = colLabels.map((_, i) => bx + 18 + i * Math.round(pw / 7));
         const headerY   = by + 52;
@@ -2392,6 +2639,7 @@ class GameRenderer {
         ctx.lineWidth   = 1;
         ctx.stroke();
 
+        // Suit rows
         const suitList = [SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS];
         const suitCnMap = { spades: '黑桃', hearts: '红心', clubs: '梅花', diamonds: '方块' };
         let rowY = headerY + 30;
@@ -2400,9 +2648,9 @@ class GameRenderer {
         for (const suit of suitList) {
             const isTs = suit === trump;
             const symCol = isTs ? '#ffd200' : (SUIT_COLOR_MAP[suit] || C_BLACK);
-            const suitCnVal = suitCnMap[suit] + (isTs ? ' ★' : '');
+            const suitCn = suitCnMap[suit] + (isTs ? ' ★' : '');
 
-            this._fillText(`${SUIT_SYMBOL[suit]} ${suitCnVal}`, colXs[0], rowY, {
+            this._fillText(`${SUIT_SYMBOL[suit]} ${suitCn}`, colXs[0], rowY, {
                 size: 14, color: symCol, bold: isTs,
             });
 
@@ -2423,6 +2671,7 @@ class GameRenderer {
             rowY += 30;
         }
 
+        // Separator
         ctx.beginPath();
         ctx.moveTo(bx + 10, rowY + 2);
         ctx.lineTo(bx + pw - 10, rowY + 2);
@@ -2431,11 +2680,12 @@ class GameRenderer {
         ctx.stroke();
         rowY += 12;
 
+        // Trump group row
         this._fillText('主牌组', bx + 18, rowY, { size: 14, color: C_GOLD, bold: true });
         const trumpGroups = [
-            ['10', 16, '10\u00d716'], ['2', 16, '2\u00d716'],
-            ['small_joker', 4, '小王\u00d74'], ['big_joker', 4, '大王\u00d74'],
-            ['character', 4, '字牌\u00d74'], ['3', 2, '3\u00d72'],
+            ['10', 16, '10×16'], ['2', 16, '2×16'],
+            ['small_joker', 4, '小王×4'], ['big_joker', 4, '大王×4'],
+            ['character', 4, '字牌×4'], ['3', 2, '3×2'],
         ];
         let tx = bx + 80;
         for (const [rank, total, label] of trumpGroups) {
@@ -2454,10 +2704,11 @@ class GameRenderer {
             else                    col = '#b4dcff';
 
             let cell;
-            if (remain === 0)       cell = label + '\u2713';
-            else if (played > 0)    cell = `${label}\u2192剩${remain}`;
+            if (remain === 0)       cell = label + '✓';
+            else if (played > 0)    cell = `${label}→剩${remain}`;
             else                    cell = label;
 
+            // Measure text width for wrapping
             ctx.font = `bold 13px ${FONT_STACK}`;
             const tw = ctx.measureText(cell).width;
             if (tx + tw > bx + pw - 10) {
@@ -2468,6 +2719,7 @@ class GameRenderer {
             tx += tw + 16;
         }
 
+        // Legend
         const legendY = by + ph - 30;
         const legends = [
             ['#464646', '─全出'],
@@ -2489,23 +2741,28 @@ class GameRenderer {
         const ctx    = this.ctx;
         const layout = this._layout();
 
+        // Clear background
         ctx.fillStyle = C_BG;
         ctx.fillRect(0, 0, layout.W, layout.H);
 
+        // Draw panels
         for (const area of [layout.top, layout.left, layout.center, layout.right, layout.bottom]) {
             this.drawPanel(area);
         }
 
+        // Draw game elements
         this._drawPlayers(layout, this.game);
         this._drawTrickArea(layout.center, this.game);
         this.drawScorePanel(layout.right, this.game);
         this.drawMessages(layout.center, this.messageLog);
         this._drawButtons(layout, this.game);
 
+        // Game end overlay
         if (this.game.phase === Phase.GAME_END) {
             this.drawGameEnd(this.game);
         }
 
+        // Card tracker popup (topmost)
         if (this.showTracker) {
             this._drawCardTracker();
         }
@@ -2556,6 +2813,7 @@ class GameRenderer {
             size: 18, color: C_HIGHLIGHT, bold: true,
         });
 
+        // Callable indices (call-trump phase)
         let callableIdx = [];
         if (game.phase === Phase.CALL_TRUMP) {
             callableIdx = p1.hand
@@ -2565,6 +2823,7 @@ class GameRenderer {
 
         const handAreaW = bottom.w - right.w - layout.pad;
 
+        // Deal animation: first `revealed` cards face-up, rest face-down
         if (isDealing) {
             const n = p1.hand.length;
             if (n === 0) { this.humanHandRects = []; return; }
@@ -2621,6 +2880,7 @@ class GameRenderer {
         const cardW = layout.cardW;
         const cardH = layout.cardH;
 
+        // Title
         this._fillText('当前一轮', area.x + 12, area.y + 8, {
             size: 16, color: C_GOLD, bold: true,
         });
@@ -2640,12 +2900,13 @@ class GameRenderer {
             });
         }
 
+        // Played cards positions (relative to center)
         const offX = area.w * 0.22;
         const offY = area.h * 0.18;
         const posMap = {
-            0: [cx - offX - cardW, cy - offY],
-            1: [cx - cardW / 2,    cy + offY],
-            2: [cx + offX,         cy - offY],
+            0: [cx - offX - cardW, cy - offY],    // Left AI
+            1: [cx - cardW / 2,    cy + offY],     // Human (bottom center)
+            2: [cx + offX,         cy - offY],     // Top AI (right of center)
         };
 
         for (const entry of game.currentTrick) {
@@ -2657,9 +2918,11 @@ class GameRenderer {
             }
         }
 
+        // Call-trump phase hints
         if (game.phase === Phase.CALL_TRUMP) {
             const revealed = this._dealRevealedCount();
             if (revealed < this.DEAL_TOTAL) {
+                // Deal animation progress
                 const pct = Math.round(revealed / this.DEAL_TOTAL * 100);
                 this._fillText(`正在发牌... ${pct}%`, cx, cy - 20, {
                     size: 20, color: C_HIGHLIGHT, center: true,
@@ -2675,6 +2938,7 @@ class GameRenderer {
                     this.ctx.fill();
                 }
             } else if (this.callPhase === 'countering') {
+                // Counter-trump round: show current call + who is deciding
                 const cname   = game.players[game.trumpCaller].name;
                 const callStr = game.trumpCallCards.map(c => c.displayName()).join(' ');
                 this._fillText(`当前叫主: ${cname}`, cx, cy - 40, {
@@ -2698,6 +2962,7 @@ class GameRenderer {
                     });
                 }
             } else if (this.callPhase === 'calling') {
+                // Initial calling round
                 const who = this.callCurrent;
                 if (game.trumpCaller !== -1) {
                     const cname   = game.players[game.trumpCaller].name;
@@ -2746,6 +3011,7 @@ class GameRenderer {
             const humanTurn = this.callWaitHuman && this.callCurrent === 1;
 
             if (humanTurn) {
+                // Check if selected cards form valid call/counter
                 const sel = this.selectedIndices
                     .filter(i => i < game.players[1].hand.length)
                     .map(i => game.players[1].hand[i]);
@@ -2771,6 +3037,7 @@ class GameRenderer {
             }
         }
 
+        // Tracker button (always visible, in right panel bottom)
         const tbW = Math.round(right.w * 0.55);
         const tbH = 36;
         this._buttonRects.tracker = this.drawButton(
@@ -2826,7 +3093,7 @@ class GameRenderer {
     }
 
     // ------------------------------------------------------------------
-    // Get button rects for input handling
+    // Get button rects for input.js
     // ------------------------------------------------------------------
     getButtonRects() {
         return this._buttonRects;
@@ -2841,23 +3108,42 @@ class GameRenderer {
  * input.js - 用户输入处理（鼠标 + 触摸）及游戏更新循环（AI计时、出牌结算）
  */
 
+
 // ---------------------------------------------------------------------------
-// Helper: display names joined by space (input.js version)
+// Helper: display names joined by space
 // ---------------------------------------------------------------------------
 
-function cardsCnInput(cards) {
+/**
+ * Returns display names of cards joined by space.
+ * @param {import('./card.js').Card[]} cards
+ * @returns {string}
+ */
+function cardsCn(cards) {
     return cards.map(c => c.displayName()).join(' ');
 }
 
 // ---------------------------------------------------------------------------
-// Hit test helpers
+// Hit test helpers (private)
 // ---------------------------------------------------------------------------
 
+/**
+ * @param {{x:number,y:number}} pos
+ * @param {{x:number,y:number,w:number,h:number}} rect
+ * @returns {boolean}
+ */
 function _hit(pos, rect) {
     return pos.x >= rect.x && pos.x <= rect.x + rect.w &&
            pos.y >= rect.y && pos.y <= rect.y + rect.h;
 }
 
+/**
+ * Inflated hit test: expands the hit zone vertically by `inflate` pixels
+ * on both the top and bottom edges (touch-friendly).
+ * @param {{x:number,y:number}} pos
+ * @param {{x:number,y:number,w:number,h:number}} rect
+ * @param {number} inflate
+ * @returns {boolean}
+ */
 function _hitInflated(pos, rect, inflate) {
     return pos.x >= rect.x && pos.x <= rect.x + rect.w &&
            pos.y >= rect.y - inflate && pos.y <= rect.y + rect.h + inflate;
@@ -2868,6 +3154,10 @@ function _hitInflated(pos, rect, inflate) {
 // ---------------------------------------------------------------------------
 
 class InputHandler {
+    /**
+     * @param {HTMLCanvasElement} canvas
+     * @param {import('./renderer.js').GameRenderer} renderer
+     */
     constructor(canvas, renderer) {
         this._canvas   = canvas;
         this._renderer = renderer;
@@ -2883,6 +3173,17 @@ class InputHandler {
         }, { passive: false });
     }
 
+    // ------------------------------------------------------------------
+    // Coordinate conversion
+    // ------------------------------------------------------------------
+
+    /**
+     * Converts screen (CSS pixel) coordinates to canvas pixel coordinates,
+     * accounting for CSS scaling.
+     * @param {number} clientX
+     * @param {number} clientY
+     * @returns {{x:number,y:number}}
+     */
     _toCanvasPos(clientX, clientY) {
         const rect   = this._canvas.getBoundingClientRect();
         const scaleX = this._canvas.width  / rect.width;
@@ -2893,25 +3194,37 @@ class InputHandler {
         };
     }
 
+    // ------------------------------------------------------------------
+    // Main pointer dispatch
+    // ------------------------------------------------------------------
+
+    /**
+     * @param {number} clientX
+     * @param {number} clientY
+     */
     _onPointer(clientX, clientY) {
         const renderer = this._renderer;
         const game     = renderer.game;
         const pos      = this._toCanvasPos(clientX, clientY);
         const btns     = renderer.getButtonRects();
 
+        // 1. Close tracker popup on any tap
         if (renderer.showTracker) {
             renderer.showTracker = false;
             return;
         }
 
+        // 2. Tracker button
         if (btns.tracker && _hit(pos, btns.tracker)) {
             renderer.showTracker = true;
             return;
         }
 
+        // 3. Game-end screen: restart button
         if (game.phase === Phase.GAME_END) {
             if (renderer._restartBtnRect && _hit(pos, renderer._restartBtnRect)) {
                 game.reset();
+                // Reset renderer state
                 renderer.selectedIndices    = [];
                 renderer.showingTrickResult = false;
                 renderer.lastTrickDisplay   = 0;
@@ -2931,17 +3244,26 @@ class InputHandler {
             return;
         }
 
+        // 4. Call-trump phase
         if (game.phase === Phase.CALL_TRUMP) {
             this._clickCallTrump(pos);
             return;
         }
 
+        // 5. Play phase
         if (game.phase === Phase.PLAY) {
             this._clickPlay(pos);
             return;
         }
     }
 
+    // ------------------------------------------------------------------
+    // Call-trump click handling
+    // ------------------------------------------------------------------
+
+    /**
+     * @param {{x:number,y:number}} pos
+     */
     _clickCallTrump(pos) {
         const renderer = this._renderer;
         const game     = renderer.game;
@@ -2949,8 +3271,11 @@ class InputHandler {
         const hand     = game.players[1].hand;
         const revealed = renderer._dealRevealedCount();
 
+        // Only respond to clicks when it's human's turn in the sequential flow
+        // (or during dealing, allow card selection)
         const humanTurn = renderer.callWaitHuman && renderer.callCurrent === 1;
 
+        // Iterate rects in REVERSE order (topmost card drawn last = visually on top)
         const rects = renderer.humanHandRects;
         for (let i = rects.length - 1; i >= 0; i--) {
             if (i >= revealed) continue;
@@ -2965,6 +3290,7 @@ class InputHandler {
             }
         }
 
+        // Call/Counter button — only when it's human's turn
         if (humanTurn && btns.call && _hit(pos, btns.call)) {
             const sel = renderer.selectedIndices
                 .filter(i => i < hand.length)
@@ -2982,7 +3308,7 @@ class InputHandler {
                     renderer.selectedIndices = [];
                     renderer._sortHumanHand();
                     const label = renderer.callPhase === 'countering' ? '反主' : '叫主';
-                    renderer.addMessage(`你${label}: ${cardsCnInput(sel)}`);
+                    renderer.addMessage(`你${label}: ${cardsCn(sel)}`);
                     renderer.callWaitHuman = false;
                     _startCounterRound(renderer, game, 1);
                 }
@@ -2992,6 +3318,7 @@ class InputHandler {
             return;
         }
 
+        // Pass button — only when it's human's turn
         if (humanTurn && btns.pass && _hit(pos, btns.pass)) {
             game.processCallTrump(1, null);
             renderer.selectedIndices = [];
@@ -3002,17 +3329,26 @@ class InputHandler {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Play-phase click handling
+    // ------------------------------------------------------------------
+
+    /**
+     * @param {{x:number,y:number}} pos
+     */
     _clickPlay(pos) {
         const renderer = this._renderer;
         const game     = renderer.game;
         const btns     = renderer.getButtonRects();
 
+        // Ignore clicks during trick-result display or when it's not human's turn
         if (renderer.showingTrickResult) return;
         if (game.whoLeads() !== 1) return;
 
         const hand  = game.players[1].hand;
         const rects = renderer.humanHandRects;
 
+        // Iterate in reverse (topmost card first)
         for (let i = rects.length - 1; i >= 0; i--) {
             if (_hitInflated(pos, rects[i], 22)) {
                 const selIdx = renderer.selectedIndices.indexOf(i);
@@ -3025,6 +3361,7 @@ class InputHandler {
             }
         }
 
+        // Play button
         if (btns.play && _hit(pos, btns.play)) {
             if (renderer.selectedIndices.length === 0) return;
 
@@ -3039,7 +3376,7 @@ class InputHandler {
             if (ok) {
                 renderer.selectedIndices = [];
                 renderer._sortHumanHand();
-                renderer.addMessage(`你出牌: ${cardsCnInput(sel)}`);
+                renderer.addMessage(`你出牌: ${cardsCn(sel)}`);
                 _afterPlay(renderer, game);
             } else {
                 renderer.addMessage(`出牌无效: ${err}`);
@@ -3050,9 +3387,15 @@ class InputHandler {
 }
 
 // ---------------------------------------------------------------------------
-// After-play hook
+// After-play hook (private)
 // ---------------------------------------------------------------------------
 
+/**
+ * Called after any player's cards are successfully played.
+ * If the trick is now complete, resolves it and sets up the result display.
+ * @param {import('./renderer.js').GameRenderer} renderer
+ * @param {import('./game.js').GameState} game
+ */
 function _afterPlay(renderer, game) {
     if (!game.isTrickComplete()) return;
 
@@ -3062,6 +3405,7 @@ function _afterPlay(renderer, game) {
 
     renderer.addMessage(`${wname} 赢得本轮${trickScore > 0 ? `，得${trickScore}分` : ''}`);
 
+    // Push all played cards to tracker
     for (const entry of game.currentTrick) {
         renderer.playedCards.push(...entry.cards);
     }
@@ -3071,17 +3415,25 @@ function _afterPlay(renderer, game) {
 }
 
 // ---------------------------------------------------------------------------
-// Update loop
+// Update loop (exported, called every animation frame from main.js)
 // ---------------------------------------------------------------------------
 
+/**
+ * Called every frame from main.js. Drives AI timing, trick resolution, etc.
+ * @param {import('./renderer.js').GameRenderer} renderer
+ */
 function updateGame(renderer) {
     const game = renderer.game;
 
+    // ------------------------------------------------------------------
+    // Trick result display: hold for 1800 ms then advance
+    // ------------------------------------------------------------------
     if (renderer.showingTrickResult) {
         if (Date.now() - renderer.lastTrickDisplay >= 1800) {
             renderer.showingTrickResult = false;
 
             if (game.allTricksDone || game.phase === Phase.GAME_END) {
+                // Game already ended (set by resolveTrick/startNextTrick)
                 game.phase = Phase.GAME_END;
             } else {
                 game.startNextTrick();
@@ -3090,33 +3442,48 @@ function updateGame(renderer) {
                 renderer.aiActionTime = 0;
             }
         }
-        return;
+        return; // Don't drive AI while showing trick result
     }
 
+    // ------------------------------------------------------------------
+    // CALL_TRUMP phase: AI call timing
+    // ------------------------------------------------------------------
     if (game.phase === Phase.CALL_TRUMP) {
         _updateCallTrump(renderer, game);
         return;
     }
 
+    // ------------------------------------------------------------------
+    // PLAY phase: AI move timing
+    // ------------------------------------------------------------------
     if (game.phase === Phase.PLAY) {
         _updatePlay(renderer, game);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Call-trump update
+// Call-trump update (private)
 // ---------------------------------------------------------------------------
 
+/**
+ * Sequential call/counter-trump flow:
+ * 1. After dealing, each player gets a turn to call (starting from callTrumpIdx)
+ * 2. If someone calls → counter-trump round: other 2 players get sequential turns
+ * 3. If someone counters → new counter round (skip the counter-er)
+ * 4. All pass → done
+ */
 function _updateCallTrump(renderer, game) {
     const now     = Date.now();
     const dealEnd = renderer.dealStartTime + renderer.DEAL_DURATION;
 
+    // Wait for dealing to finish
     if (now < dealEnd) return;
 
-    // Start initial calling round once dealing is done
+    // ── Start initial calling round once dealing is done ──
     if (renderer.callPhase === 'idle') {
         renderer.callPhase = 'calling';
         renderer.callOrder = [];
+        // Starting player + next 2 in order
         for (let offset = 0; offset < 3; offset++) {
             renderer.callOrder.push((game.callTrumpIdx + offset) % 3);
         }
@@ -3124,10 +3491,10 @@ function _updateCallTrump(renderer, game) {
         return;
     }
 
-    // Current player
+    // ── Countering / Calling: process current player ──
     const idx = renderer.callCurrent;
 
-    // Human's turn → wait for click
+    // Human's turn → wait for click (handled in _clickCallTrump)
     if (idx === 1) return;
 
     // AI's turn → wait for timer
@@ -3139,18 +3506,20 @@ function _updateCallTrump(renderer, game) {
     const call = aiDecideCallTrump(player.hand, currentCall);
 
     if (renderer.callPhase === 'calling') {
+        // Initial calling round
         if (call && game.processCallTrump(idx, call)) {
             renderer._sortHumanHand();
-            renderer.addMessage(`${player.name} 叫主: ${cardsCnInput(call)}`);
+            renderer.addMessage(`${player.name} 叫主: ${cardsCn(call)}`);
             _startCounterRound(renderer, game, idx);
         } else {
             renderer.addMessage(`${player.name} Pass`);
             _advanceCallTurn(renderer, game);
         }
     } else {
+        // Counter round
         if (call && canCounterTrump(call, currentCall) && game.processCallTrump(idx, call)) {
             renderer._sortHumanHand();
-            renderer.addMessage(`${player.name} 反主: ${cardsCnInput(call)}`);
+            renderer.addMessage(`${player.name} 反主: ${cardsCn(call)}`);
             _startCounterRound(renderer, game, idx);
         } else {
             renderer.addMessage(`${player.name} Pass`);
@@ -3159,6 +3528,9 @@ function _updateCallTrump(renderer, game) {
     }
 }
 
+/**
+ * Start a counter-trump round: other 2 players get turns after the caller.
+ */
 function _startCounterRound(renderer, game, callerIdx) {
     renderer.callPhase = 'countering';
     renderer.callOrder = [];
@@ -3168,16 +3540,23 @@ function _startCounterRound(renderer, game, callerIdx) {
     _advanceCallTurn(renderer, game);
 }
 
+/**
+ * Advance to the next player in the call/counter queue.
+ */
 function _advanceCallTurn(renderer, game) {
     if (renderer.callOrder.length === 0) {
+        // All players have decided
         if (renderer.callPhase === 'calling' && game.trumpCaller === -1) {
+            // No one called → 常主
             game.finishCallTrump();
             renderer.callPhase = 'idle';
             renderer._sortHumanHand();
             renderer.addMessage('无人叫主，常主模式');
         } else if (renderer.callPhase === 'calling' && game.trumpCaller !== -1) {
+            // Someone called during initial round, start counter
             _startCounterRound(renderer, game, game.trumpCaller);
         } else {
+            // Counter round done, all passed
             game.finishCallTrump();
             renderer.callPhase = 'idle';
             renderer._sortHumanHand();
@@ -3189,33 +3568,43 @@ function _advanceCallTurn(renderer, game) {
     renderer.callCurrent = renderer.callOrder.shift();
 
     if (renderer.callCurrent === 1) {
+        // Human's turn
         renderer.callWaitHuman = true;
         renderer.selectedIndices = [];
     } else {
+        // AI's turn: 1.2s delay
         renderer.callWaitHuman = false;
         renderer.callAiTime = Date.now() + 1200;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Play update
+// Play update (private)
 // ---------------------------------------------------------------------------
 
+/**
+ * Handles AI timing for the play phase.
+ * @param {import('./renderer.js').GameRenderer} renderer
+ * @param {import('./game.js').GameState} game
+ */
 function _updatePlay(renderer, game) {
     const leader = game.whoLeads();
 
+    // -1 = trick complete (waiting for result display), 1 = human's turn
     if (leader === -1 || leader === 1) return;
 
     const now = Date.now();
 
     if (!renderer.aiPending) {
+        // Schedule the AI move
         renderer.aiPending    = true;
         renderer.aiActionTime = now + renderer.aiDelay;
         return;
     }
 
-    if (now < renderer.aiActionTime) return;
+    if (now < renderer.aiActionTime) return; // still waiting
 
+    // Time to play!
     renderer.aiPending = false;
 
     const hand       = game.players[leader].hand;
@@ -3226,51 +3615,62 @@ function _updatePlay(renderer, game) {
     let cards;
     try {
         if (!ledCards) {
-            cards = aiLead(hand, trumpSuit, anyUnplayed);
+            // This AI is leading the trick
+            cards = aiLead(hand, trumpSuit, anyUnplayed,
+                          leader === game.trumpCaller ? game.mustPlayCards : null);
         } else {
+            // Following
             const currentBest  = game.getCurrentBest() ?? [];
             const trickHasScore = game.trickHasScore();
             cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
         }
 
+        // Ensure the AI plays the correct number of cards
         if (ledCards && cards.length !== ledCards.length) {
             const needed = ledCards.length;
             if (cards.length > needed) {
                 cards = cards.slice(0, needed);
             } else {
+                // Pad from the rest of hand
                 const extra = hand.filter(c => !cards.includes(c));
                 cards = [...cards, ...extra].slice(0, needed);
             }
         }
 
+        // Validate cards are actually in the hand
         cards = cards.filter(c => hand.includes(c));
         if (cards.length === 0) cards = hand.slice(0, ledCards ? ledCards.length : 1);
 
     } catch (e) {
         console.error('AI decision error:', e);
+        // Fallback: pick first N cards from hand
         const n = ledCards ? ledCards.length : 1;
         cards = hand.slice(0, n);
     }
 
+    // Play the cards (skipValidation = true for AI)
     const [ok, err] = game.playCards(leader, cards, true);
     if (ok) {
-        renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCnInput(cards)}`);
+        renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCn(cards)}`);
         _afterPlay(renderer, game);
     } else {
+        // Fallback: brute-force first N cards
         console.warn(`AI playCards failed (${err}), using fallback`);
         const n       = ledCards ? ledCards.length : 1;
         const fbCards = hand.slice(0, Math.min(n, hand.length));
         const [fbOk]  = game.playCards(leader, fbCards, true);
         if (fbOk) {
-            renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCnInput(fbCards)}`);
+            renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCn(fbCards)}`);
             _afterPlay(renderer, game);
         }
     }
 }
 
 // =========================================================================
-// main.js — game entry point (runs at load time)
+// main.js
 // =========================================================================
+
+// js/main.js — game entry point
 
 const canvas = document.getElementById('game');
 
