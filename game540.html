@@ -254,11 +254,6 @@ function totalScore(cards) {
  * Translated from game_540/rules.py (Python → ES module JS)
  */
 
-    Card, SUITS, SUIT_SPECIAL,
-    RANK_SMALL_JOKER, RANK_BIG_JOKER, RANK_CHARACTER, RANK_THREE,
-    REGULAR_RANK_ORDER, SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS,
-} from './card.js';
-
 // ---------------------------------------------------------------------------
 // Suit priority (used for trump calling tie-breaks)
 // ---------------------------------------------------------------------------
@@ -953,14 +948,6 @@ function _pickPadFromPool(pool, n, trumpSuit) {
  * Translated from game_540/game.py (Python → ES module JS)
  */
 
-    isTrump, cardPower, getPlayType, PlayType,
-    canCallTrump, canCounterTrump,
-    getFollowSuit, filterHandBySuit,
-    getPairs, getTriples, getBombs,
-    mustLeadPairOrBiggest, getPadCards,
-    validateFollow, doesBeat, _canPlayerBeat,
-} from './rules.js';
-
 // ---------------------------------------------------------------------------
 // 游戏阶段
 // ---------------------------------------------------------------------------
@@ -1424,15 +1411,6 @@ class GameState {
  * Translated from game_540/ai.py (Python → ES module JS)
  */
 
-    cardPower, isTrump, getPlayType, PlayType,
-    canCallTrump, canCounterTrump,
-    getPairs, getTriples, getBombs,
-    getFollowSuit, filterHandBySuit,
-    doesBeat, _canPlayerBeat,
-    isConsecutivePairs, pairKey, trumpPairOrder,
-    validateFollow,
-} from './rules.js';
-
 // ---------------------------------------------------------------------------
 // 叫主 AI
 // ---------------------------------------------------------------------------
@@ -1887,13 +1865,6 @@ function _pickDiscard(hand, n, trumpSuit) {
  *
  * Translated from game_540/ui.py (pygame → HTML5 Canvas 2D)
  */
-
-    SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS, SUIT_SPECIAL,
-    RANK_DISPLAY,
-} from './card.js';
-    isTrump, cardPower, canCallTrump, canCounterTrump,
-    getPairs, PlayType, getPlayType,
-} from './rules.js';
 
 // ---------------------------------------------------------------------------
 // Color constants
