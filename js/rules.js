@@ -502,12 +502,13 @@ export function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
 }
 
 /**
- * Returns true if followCards beats currentBest.
- * Renamed from _does_beat; exported because other modules use it.
- * @param {Card[]} followCards
- * @param {Card[]} currentBest
- * @param {string|null} trumpSuit
- * @returns {boolean}
+ * Compares two card plays using trump-then-suit-then-power ordering.
+ * Helper function used by doesBeat to determine card comparison logic.
+ * @param {Card[]} followCards - Cards being played (to compare)
+ * @param {Card[]} bestCards - Current best cards (to compare against)
+ * @param {string|null} trumpSuit - Current trump suit
+ * @param {Function} pick - Reducer function (Math.max or Math.min) for selecting power value
+ * @returns {boolean} True if followCards beats bestCards
  */
 function _compareByTrumpThenSuitThenPower(followCards, bestCards, trumpSuit, pick) {
     const followTrump = followCards.some(c => isTrump(c, trumpSuit));
@@ -523,6 +524,15 @@ function _compareByTrumpThenSuitThenPower(followCards, bestCards, trumpSuit, pic
     return followPower > bestPower;
 }
 
+/**
+ * Returns true if followCards beats currentBest.
+ * Handles bomb override, play-type matching, same-length-window rule for
+ * consecutive pairs/triples, and trump-suit-power comparison for other types.
+ * @param {Card[]} followCards - Cards being played
+ * @param {Card[]} currentBest - Current best cards to beat
+ * @param {string|null} trumpSuit - Current trump suit
+ * @returns {boolean} True if followCards beats currentBest
+ */
 export function doesBeat(followCards, currentBest, trumpSuit) {
     const followType = getPlayType(followCards, trumpSuit);
 
