@@ -196,6 +196,17 @@ export function getBombs(hand, trumpSuit) {
 // Consecutive pairs / triples ordering
 // ---------------------------------------------------------------------------
 
+const SIDE_RANK_STEP = { A: 5, K: 4, Q: 3, J: 2, '5': 1 };  // 同花色内部相邻，差值均为1
+const SIDE_SUIT_BASE = 1000;                                 // 与主牌数值段（个位数~十几）完全不重叠
+const SIDE_SUIT_GAP  = 100;                                  // 花色间隔，远大于同花色内部最大差值(4)
+
+function _sideOrder(suit, rank) {
+    if (!(rank in SIDE_RANK_STEP)) return -1;
+    const suitIdx = SUITS.indexOf(suit);
+    if (suitIdx < 0) return -1;
+    return SIDE_SUIT_BASE + suitIdx * SIDE_SUIT_GAP + SIDE_RANK_STEP[rank];
+}
+
 /**
  * Returns the ordering index of a pair within the trump sequence.
  * Higher = stronger. Returns -1 for non-consecutive pairs.
@@ -218,7 +229,7 @@ export function trumpPairOrder(pair, trumpSuit) {
             [RANK_BIG_JOKER]:  2,
             [RANK_SMALL_JOKER]: 1,
         };
-        return orderMap[rank] ?? -1;
+        return orderMap[rank] ?? _sideOrder(suit, rank);
     } else {
         if (rank === RANK_THREE)      return 14;
         if (rank === RANK_CHARACTER)  return 13;
@@ -230,7 +241,7 @@ export function trumpPairOrder(pair, trumpSuit) {
         if (rank === '2') return 7;
         const regularOrder = { 'A': 6, 'K': 5, 'Q': 4, 'J': 3, '5': 2 };
         if (suit === trumpSuit) return regularOrder[rank] ?? -1;
-        return -1;
+        return _sideOrder(suit, rank);
     }
 }
 
