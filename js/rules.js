@@ -483,7 +483,31 @@ const _SUIT_CN = {
 // ---------------------------------------------------------------------------
 
 /**
+ * Finds all consecutive windows of a given size from groups, using trumpPairOrder.
+ * For example, if groups has pairs ordered as [order=3, order=4, order=5, order=6],
+ * and windowCount=2, returns [[group@3, group@4], [group@4, group@5], [group@5, group@6]].
+ * @param {Array<Array<Card>>} groups - Array of card groups (pairs or triples)
+ * @param {string|null} trumpSuit - Current trump suit
+ * @param {number} windowCount - Size of consecutive window to find
+ * @returns {Array<Array<Card>>} Array of consecutive windows, each flattened to a card array
+ */
+function _consecutiveWindows(groups, trumpSuit, windowCount) {
+    const withOrder = groups
+        .map(g => ({ group: g, order: trumpPairOrder(g, trumpSuit) }))
+        .filter(x => x.order >= 0)
+        .sort((a, b) => a.order - b.order);
+    const windows = [];
+    for (let i = 0; i + windowCount <= withOrder.length; i++) {
+        const slice = withOrder.slice(i, i + windowCount);
+        const isConsecutive = slice.every((x, j) => j === 0 || x.order - slice[j - 1].order === 1);
+        if (isConsecutive) windows.push(slice.flatMap(x => x.group));
+    }
+    return windows;
+}
+
+/**
  * Returns true if the player's hand contains a card that can beat the current best.
+ * Uses doesBeat as the single source of truth for beating logic.
  * Exported because game.js uses it.
  * @param {Card[]} hand
  * @param {Card[]} currentBest
@@ -492,35 +516,22 @@ const _SUIT_CN = {
  * @returns {boolean}
  */
 export function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
-    const ledSuit = getFollowSuit(ledCards, trumpSuit);
-    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
     if (!currentBest || currentBest.length === 0) return false;
-    const bestPower = Math.max(...currentBest.map(c => cardPower(c, trumpSuit, c.playOrder)));
+    const ledSuit    = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    const ledType    = getPlayType(ledCards, trumpSuit);
+    // 有该花色牌只能用该花色试；没有该花色牌时改用主牌试（若ledSuit本身就是'trump'，两者相同）
+    const pool = handInSuit.length > 0 ? handInSuit : filterHandBySuit(hand, 'trump', trumpSuit);
 
-    const ledType = getPlayType(ledCards, trumpSuit);
-
-    if (ledType === PlayType.PAIR) {
-        for (const pair of getPairs(handInSuit, trumpSuit)) {
-            if (Math.max(cardPower(pair[0], trumpSuit, 0), cardPower(pair[1], trumpSuit, 0)) > bestPower) {
-                return true;
-            }
-        }
-        return false;
+    if (ledType === PlayType.PAIR)   return getPairs(pool, trumpSuit).some(p => doesBeat(p, currentBest, trumpSuit));
+    if (ledType === PlayType.TRIPLE) return getTriples(pool, trumpSuit).some(t => doesBeat(t, currentBest, trumpSuit));
+    if (ledType === PlayType.CONSEC_PAIRS || ledType === PlayType.CONSEC_TRIPLES) {
+        const groupSize   = ledType === PlayType.CONSEC_PAIRS ? 2 : 3;
+        const windowCount = ledCards.length / groupSize;
+        const groups      = groupSize === 2 ? getPairs(pool, trumpSuit) : getTriples(pool, trumpSuit);
+        return _consecutiveWindows(groups, trumpSuit, windowCount).some(cand => doesBeat(cand, currentBest, trumpSuit));
     }
-
-    if (ledType === PlayType.TRIPLE) {
-        for (const triple of getTriples(handInSuit, trumpSuit)) {
-            if (Math.max(...triple.map(c => cardPower(c, trumpSuit, 0))) > bestPower) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    for (const card of handInSuit) {
-        if (cardPower(card, trumpSuit, 0) > bestPower) return true;
-    }
-    return false;
+    return pool.some(c => doesBeat([c], currentBest, trumpSuit));
 }
 
 /**
