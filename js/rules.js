@@ -210,6 +210,17 @@ function _sideOrder(suit, rank) {
 /**
  * Returns the ordering index of a pair within the trump sequence.
  * Higher = stronger. Returns -1 for non-consecutive pairs.
+ *
+ * Return value ranges by card type:
+ * - Main-card (主牌) sequence pairs: 1-14
+ * - Side-suit (副牌) same-suit A/K/Q/J/5 pairs: 1000-1305 (via _sideOrder helper)
+ *   The large gap between suit segments (100) is intentional to ensure that
+ *   different suits' side-card groups never appear adjacent.
+ *
+ * NOTE: Returned values are only meaningful for adjacency comparison within the
+ * same suit/sequence group (checking whether two groups' order values differ by
+ * exactly 1). They are NOT absolute cross-suit/cross-group strength scores.
+ *
  * Exported because ai.js uses it.
  * @param {Array<Card>} pair - A [Card, Card] array
  * @param {string|null} trumpSuit
