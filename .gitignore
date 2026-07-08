@@ -17,3 +17,6 @@ build/
 # Env
 .env
 .env.local
+
+# Git worktrees
+.worktrees/
