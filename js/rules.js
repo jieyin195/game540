@@ -509,42 +509,42 @@ export function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
  * @param {string|null} trumpSuit
  * @returns {boolean}
  */
+function _compareByTrumpThenSuitThenPower(followCards, bestCards, trumpSuit, pick) {
+    const followTrump = followCards.some(c => isTrump(c, trumpSuit));
+    const bestTrump    = bestCards.some(c => isTrump(c, trumpSuit));
+
+    if (followTrump && !bestTrump) return true;
+    if (!followTrump && bestTrump) return false;
+    // 都不是主牌：不同花色不可比，先出者（currentBest）仍然大
+    if (!followTrump && !bestTrump && followCards[0].suit !== bestCards[0].suit) return false;
+
+    const followPower = pick(...followCards.map(c => cardPower(c, trumpSuit)));
+    const bestPower    = pick(...bestCards.map(c => cardPower(c, trumpSuit)));
+    return followPower > bestPower;
+}
+
 export function doesBeat(followCards, currentBest, trumpSuit) {
     const followType = getPlayType(followCards, trumpSuit);
+
     if (followType === PlayType.BOMB) {
         if (!currentBest || currentBest.length === 0) return true;
         const bestType = getPlayType(currentBest, trumpSuit);
         if (bestType !== PlayType.BOMB) return true;
-        const followIsTrump = followCards.some(c => isTrump(c, trumpSuit));
-        const bestIsTrump   = currentBest.some(c => isTrump(c, trumpSuit));
-        if (followIsTrump && !bestIsTrump) return true;
-        if (!followIsTrump && bestIsTrump) return false;
-        const fp = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
-        const bp = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
-        return fp > bp;
+        return _compareByTrumpThenSuitThenPower(followCards, currentBest, trumpSuit, Math.max);
     }
-    if (!currentBest || currentBest.length === 0) return true;
 
+    if (!currentBest || currentBest.length === 0) return true;
     const bestType = getPlayType(currentBest, trumpSuit);
 
-    // 连对/连三同张：只能被同类型同长度的连对压
+    // 牌型不匹配（不是同一种合法牌型）一律不能压
+    if (followType !== bestType) return false;
+
     if (bestType === PlayType.CONSEC_PAIRS || bestType === PlayType.CONSEC_TRIPLES) {
-        if (followType !== bestType) return false;
         if (followCards.length !== currentBest.length) return false;
-        const followMin = Math.min(...followCards.map(c => cardPower(c, trumpSuit)));
-        const bestMin   = Math.min(...currentBest.map(c => cardPower(c, trumpSuit)));
-        return followMin > bestMin;
+        return _compareByTrumpThenSuitThenPower(followCards, currentBest, trumpSuit, Math.min);
     }
 
-    const followPower = Math.max(...followCards.map(c => cardPower(c, trumpSuit)));
-    const bestPower   = Math.max(...currentBest.map(c => cardPower(c, trumpSuit)));
-
-    const followTrump = followCards.some(c => isTrump(c, trumpSuit));
-    const bestTrump   = currentBest.some(c => isTrump(c, trumpSuit));
-
-    if (followTrump && !bestTrump) return true;
-    if (!followTrump && bestTrump) return false;
-    return followPower > bestPower;
+    return _compareByTrumpThenSuitThenPower(followCards, currentBest, trumpSuit, Math.max);
 }
 
 // ---------------------------------------------------------------------------
