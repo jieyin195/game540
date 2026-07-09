@@ -499,7 +499,7 @@ function _advanceCallTurn(renderer, game) {
 function _safeLeadFallback(hand, trumpSuit, anyUnplayed, mustPlayCards) {
     if (mustPlayCards && mustPlayCards.length > 0) return [...mustPlayCards];
     if (anyUnplayed) return mustLeadPairOrBiggest(hand, trumpSuit);
-    return [hand.reduce((a, b) => cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b)];
+    return [hand.reduce((a, b) => cardPower(a, trumpSuit) > cardPower(b, trumpSuit) ? a : b)];
 }
 
 /**

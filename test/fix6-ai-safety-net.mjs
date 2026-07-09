@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { Card, SUIT_CLUBS, SUIT_DIAMONDS } from '../js/card.js';
 import { GameState, TrickEntry, Phase } from '../js/game.js';
 import { submitAiPlay } from '../js/input.js';
+import { cardPower } from '../js/rules.js';
 
 function freshGame() {
     const game = new GameState();
@@ -93,6 +94,53 @@ function freshGame() {
     assert.equal(finalCards[0], clubA, '暴力兜底按手牌原有顺序取牌，应该是clubA');
     assert.equal(warnCalls.length, 1, '应该记录一次"使用安全兜底"警告');
     assert.equal(errorCalls.length, 1, '结构化兜底仍失败时应该记录一次"回退暴力方案"错误');
+}
+
+// 场景3：自由领出（无强制反主牌、无"必须出对子"限制）时，结构化安全兜底
+// 应该出手牌中力量最大的单张，而不是最小的
+{
+    const game = freshGame();
+    const leader = 2;
+    game.firstPlayer    = 2;
+    game.currentTrick   = [];
+    game.trickCardCount = 0;
+    game.players[0].hasPlayed = true;
+    game.players[1].hasPlayed = true;
+    game.players[2].hasPlayed = false;
+
+    const clubJ = new Card(SUIT_CLUBS, 'J');
+    const clubK = new Card(SUIT_CLUBS, 'K');
+    const clubA = new Card(SUIT_CLUBS, 'A');
+    game.players[2].hand = [clubJ, clubK, clubA];
+
+    // 故意传入一张不在手牌里的牌，逼迫 submitAiPlay 的初次校验失败，走到结构化安全兜底
+    const badCards = [new Card(SUIT_DIAMONDS, '9')];
+
+    const warnCalls = [];
+    const origWarn = console.warn;
+    console.warn = (...a) => warnCalls.push(a);
+
+    // Compute expected best BEFORE calling submitAiPlay, since it modifies the hand
+    const expectedBest = game.players[2].hand.reduce((a, b) =>
+        cardPower(a, game.trumpSuit) > cardPower(b, game.trumpSuit) ? a : b);
+
+    let ok, finalCards;
+    try {
+        [ok, finalCards] = submitAiPlay(game, leader, badCards, {
+            ledCards:    game.getLedCards(),
+            hand:        game.players[2].hand,
+            trumpSuit:   game.trumpSuit,
+            needed:      1,
+            anyUnplayed: false,
+        });
+    } finally {
+        console.warn = origWarn;
+    }
+
+    assert.equal(ok, true, '安全兜底后应该成功出牌');
+    assert.equal(finalCards.length, 1);
+    assert.equal(finalCards[0], expectedBest, '无强制项的领出兜底应该出手牌中最大单张，而不是最小单张');
+    assert.equal(warnCalls.length, 1, '应该记录一次"使用安全兜底"警告');
 }
 
 console.log('PASS: fix6-ai-safety-net');
