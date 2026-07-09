@@ -3,8 +3,8 @@
  */
 
 import { Phase } from './game.js';
-import { canCallTrump, canCounterTrump } from './rules.js';
-import { aiDecideCallTrump, aiLead, aiFollow } from './ai.js';
+import { canCallTrump, canCounterTrump, mustLeadPairOrBiggest, cardPower } from './rules.js';
+import { aiDecideCallTrump, aiLead, aiFollow, safeFollowFallback } from './ai.js';
 
 // ---------------------------------------------------------------------------
 // Helper: display names joined by space
@@ -485,6 +485,52 @@ function _advanceCallTurn(renderer, game) {
 }
 
 // ---------------------------------------------------------------------------
+// AI 出牌安全网（先校验，失败则结构化兜底，兜底也失败才暴力兜底）
+// ---------------------------------------------------------------------------
+
+/**
+ * 领出侧的结构化安全兜底：反主牌必出 > 有对子出对子 > 无对子出最大单张。
+ * @param {import('./card.js').Card[]} hand
+ * @param {string|null} trumpSuit
+ * @param {boolean} anyUnplayed
+ * @param {import('./card.js').Card[]|null} mustPlayCards
+ * @returns {import('./card.js').Card[]}
+ */
+function _safeLeadFallback(hand, trumpSuit, anyUnplayed, mustPlayCards) {
+    if (mustPlayCards && mustPlayCards.length > 0) return [...mustPlayCards];
+    if (anyUnplayed) return mustLeadPairOrBiggest(hand, trumpSuit);
+    return [hand.reduce((a, b) => cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b)];
+}
+
+/**
+ * 提交 AI 出牌：先用真实规则校验，校验失败则用结构化安全兜底再校验一次，
+ * 兜底也失败时才回退暴力方案（保证不会比现状更差）。
+ * @param {import('./game.js').GameState} game
+ * @param {number} leader
+ * @param {import('./card.js').Card[]} cards
+ * @param {{ledCards: import('./card.js').Card[]|null, hand: import('./card.js').Card[], trumpSuit: string|null, needed: number, anyUnplayed: boolean}} ctx
+ * @returns {[boolean, import('./card.js').Card[]]}
+ */
+export function submitAiPlay(game, leader, cards, ctx) {
+    const { ledCards, hand, trumpSuit, needed, anyUnplayed } = ctx;
+
+    let [ok, err] = game.playCards(leader, cards, false);
+    if (!ok) {
+        console.warn(`AI ${ledCards ? '跟牌' : '出牌'}未通过校验 (${err})，使用安全兜底`);
+        cards = ledCards
+            ? safeFollowFallback(hand, ledCards, trumpSuit, needed)
+            : _safeLeadFallback(hand, trumpSuit, anyUnplayed, leader === game.trumpCaller ? game.mustPlayCards : null);
+        [ok, err] = game.playCards(leader, cards, false);
+        if (!ok) {
+            console.error(`安全兜底仍未通过校验 (${err})，回退暴力方案`);
+            cards = hand.slice(0, needed);
+            [ok, err] = game.playCards(leader, cards, true);
+        }
+    }
+    return [ok, cards];
+}
+
+// ---------------------------------------------------------------------------
 // Play update (private)
 // ---------------------------------------------------------------------------
 
@@ -552,20 +598,11 @@ function _updatePlay(renderer, game) {
         cards = hand.slice(0, n);
     }
 
-    // Play the cards (skipValidation = true for AI)
-    const [ok, err] = game.playCards(leader, cards, true);
+    // Play the cards (validated; safety net falls back if AI output is invalid)
+    const needed = ledCards ? game.trickCardCount : cards.length;
+    const [ok, finalCards] = submitAiPlay(game, leader, cards, { ledCards, hand, trumpSuit, needed, anyUnplayed });
     if (ok) {
-        renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCn(cards)}`);
+        renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCn(finalCards)}`);
         _afterPlay(renderer, game);
-    } else {
-        // Fallback: brute-force first N cards
-        console.warn(`AI playCards failed (${err}), using fallback`);
-        const n       = ledCards ? game.trickCardCount : 1;
-        const fbCards = hand.slice(0, Math.min(n, hand.length));
-        const [fbOk]  = game.playCards(leader, fbCards, true);
-        if (fbOk) {
-            renderer.addMessage(`${game.players[leader].name} 出牌: ${cardsCn(fbCards)}`);
-            _afterPlay(renderer, game);
-        }
     }
 }

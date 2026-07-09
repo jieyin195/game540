@@ -517,3 +517,18 @@ function _pickStructuredDiscard(pool, fullHand, n, trumpSuit) {
     }
     return result.slice(0, n);
 }
+
+/**
+ * 跟牌侧结构化安全兜底：优先用同花色牌按"垫最接近相同的牌"原则出牌。
+ * 只做结构合法性兜底，不尝试主动压牌。
+ * @param {import('./card.js').Card[]} hand
+ * @param {import('./card.js').Card[]} ledCards
+ * @param {string|null} trumpSuit
+ * @param {number} requiredCount
+ * @returns {import('./card.js').Card[]}
+ */
+export function safeFollowFallback(hand, ledCards, trumpSuit, requiredCount) {
+    const ledSuit    = getFollowSuit(ledCards, trumpSuit);
+    const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
+    return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, requiredCount, trumpSuit);
+}
