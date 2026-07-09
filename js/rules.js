@@ -712,9 +712,11 @@ function _validateBombFollowStructure(followInSuit, handInSuit, trumpSuit) {
  * @param {Card[]} followCards
  * @param {Card[]} pool - The available card pool (in-suit or off-suit hand)
  * @param {string|null} trumpSuit
+ * @param {boolean} isBeatingPlay - If true, this is a beating play (压牌) and is exempt from the check
  * @returns {[boolean, string]}
  */
-function _checkNoVoluntaryScore(followCards, pool, trumpSuit) {
+function _checkNoVoluntaryScore(followCards, pool, trumpSuit, isBeatingPlay) {
+    if (isBeatingPlay) return [true, ''];   // 压牌不算主动垫分
     if (!followCards.some(c => c.scoreValue() > 0)) return [true, ''];
     const n = followCards.length;
     const nonScore = pool.filter(c => c.scoreValue() === 0);
@@ -807,18 +809,21 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     }
 
     // Rule: no voluntary score discard (不能主动垫分牌)
-    // 分别检查同花色和异花色部分
+    // 分别检查同花色和异花色部分；压牌（真的赢下这一墩）豁免"主动垫分"检查
+    const isBeatingPlay = (currentBest && currentBest.length > 0)
+        ? doesBeat(followCards, currentBest, trumpSuit)
+        : false;
     const followInSuit  = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
     const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
     if (followInSuit.length > 0 && handInSuit.length > 0) {
-        const [ok, err] = _checkNoVoluntaryScore(followInSuit, handInSuit, trumpSuit);
+        const [ok, err] = _checkNoVoluntaryScore(followInSuit, handInSuit, trumpSuit, isBeatingPlay);
         if (!ok) return [false, err];
     }
     if (followOffSuit.length > 0) {
         const handOffSuit = hand.filter(c => !handInSuit.includes(c));
         if (handOffSuit.length > 0) {
-            const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit);
+            const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit, isBeatingPlay);
             if (!ok) return [false, err];
         }
     }
