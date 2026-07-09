@@ -414,7 +414,7 @@ function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 
     }
 
     // 无3同张：用对子+单张或3单张
-    return _pickDiscard(handInSuit.length ? handInSuit : hand, n, trumpSuit);
+    return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, n, trumpSuit);
 }
 
 /**
