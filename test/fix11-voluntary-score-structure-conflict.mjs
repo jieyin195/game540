@@ -79,4 +79,57 @@ import { validateFollow } from '../js/rules.js';
     assert.equal(err, '垫分牌须按分小牌小顺序', `错误信息不符，实际: ${err}`);
 }
 
+// 场景6（TRIPLE 分支，成型组合+补位单张全部被迫打出，无替代解）：
+// 同花色恰好3张——一对计分K + 一张计分5，凑不出三同张，跟三同张时3张全部被迫打出。
+// 补位单张（那张5）没有任何非计分替代（手牌已耗尽），不应判"主动垫分"。
+{
+    const K1 = new Card(SUIT_CLUBS, 'K');
+    const K2 = new Card(SUIT_CLUBS, 'K');
+    const C5 = new Card(SUIT_CLUBS, '5');
+    const ledCards = [
+        new Card(SUIT_CLUBS, 'A'), new Card(SUIT_CLUBS, 'A'), new Card(SUIT_CLUBS, 'A'),
+    ];
+    const hand        = [K1, K2, C5];
+    const followCards = [K1, K2, C5];
+    const [ok, err] = validateFollow(followCards, ledCards, hand, null, false, [], 3);
+    assert.equal(ok, true, `三同张回退到"对子+单张"、补位单张别无选择时，不应判违规，实际错误: ${err}`);
+}
+
+// 场景7（BOMB 分支，成型组合+2张补位单张全部被迫打出，无替代解）：
+// 同花色恰好4张——一对计分K + 计分5 + 非计分J，凑不出炸弹/三同张/两对，
+// 跟炸弹时4张全部被迫打出。补位单张（5、J）虽然J不计分，但因为是
+// "全部被迫打出"（没有更多同花色牌可选），不应判"主动垫分"。
+{
+    const K1 = new Card(SUIT_CLUBS, 'K');
+    const K2 = new Card(SUIT_CLUBS, 'K');
+    const C5 = new Card(SUIT_CLUBS, '5');
+    const CJ = new Card(SUIT_CLUBS, 'J');
+    const ledCards = [
+        new Card(SUIT_CLUBS, 'Q'), new Card(SUIT_CLUBS, 'Q'),
+        new Card(SUIT_CLUBS, 'Q'), new Card(SUIT_CLUBS, 'Q'),
+    ];
+    const hand        = [K1, K2, C5, CJ];
+    const followCards = [K1, K2, C5, CJ];
+    const [ok, err] = validateFollow(followCards, ledCards, hand, null, false, [], 4);
+    assert.equal(ok, true, `凑不出炸弹/三同张/两对、补位单张全部被迫打出时，不应判违规，实际错误: ${err}`);
+}
+
+// 场景8（补位单张层级的"分小牌小"检查，新逻辑分支，此前无测试覆盖）：
+// 同花色4张——一对计分K + 计分5 + 非计分J，凑不出三同张，跟三同张只需
+// 3张，玩家选择"K对 + 计分5"，本可以选"K对 + 非计分J"，应判违规。
+{
+    const K1 = new Card(SUIT_CLUBS, 'K');
+    const K2 = new Card(SUIT_CLUBS, 'K');
+    const C5 = new Card(SUIT_CLUBS, '5');
+    const CJ = new Card(SUIT_CLUBS, 'J');
+    const ledCards = [
+        new Card(SUIT_CLUBS, 'A'), new Card(SUIT_CLUBS, 'A'), new Card(SUIT_CLUBS, 'A'),
+    ];
+    const hand        = [K1, K2, C5, CJ];
+    const followCards = [K1, K2, C5];
+    const [ok, err] = validateFollow(followCards, ledCards, hand, null, false, [], 3);
+    assert.equal(ok, false, '补位单张有非计分可选（J）却选了计分的5，应判"不能主动垫分牌"');
+    assert.equal(err, '不能主动垫分牌', `错误信息不符，实际: ${err}`);
+}
+
 console.log('PASS: fix11-voluntary-score-structure-conflict');

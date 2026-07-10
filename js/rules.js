@@ -734,29 +734,28 @@ function _checkNoVoluntaryScore(followCards, pool, trumpSuit, isBeatingPlay) {
 }
 
 // ---------------------------------------------------------------------------
-// Voluntary score pool narrowing
+// Forced group narrowing
 // ---------------------------------------------------------------------------
 
 /**
- * 计算"不能主动垫分牌"检查应使用的候选池：当 _validateFollowStructure /
- * _validateBombFollowStructure 强制玩家使用某个成型组合（对子/三同张/炸弹）时，
- * 候选池收窄为"手里其他同类型的成型组合"，排除配不成对/三张的零散单张——
- * 它们从来都不是合法的替代出法，不该被当作"本可以少垫分"的证据。
- * 分支逐一镜像 _validateFollowStructure / _validateBombFollowStructure 的
- * 既有强制条件，保证收窄范围与结构规则实际强制的范围完全一致。
+ * 计算"不能主动垫分牌"检查中，结构规则强制玩家使用的那组成型组合
+ * （对子/三同张/炸弹）具体是哪些牌。分支逐一镜像 _validateFollowStructure /
+ * _validateBombFollowStructure 的既有强制条件，保证识别范围与结构规则
+ * 实际强制的范围完全一致。返回空数组表示当前 effectiveLedType 不触发
+ * 任何成型强制（例如 SINGLE），跟牌张数里没有必须原样保留的"组"。
  * @param {Card[]} handInSuit
  * @param {string} effectiveLedType
  * @param {number} n - followInSuit.length（本次同花色/主牌实际出牌张数）
  * @param {string|null} trumpSuit
  * @returns {Card[]}
  */
-function _voluntaryScorePool(handInSuit, effectiveLedType, n, trumpSuit) {
+function _forcedGroupCards(handInSuit, effectiveLedType, n, trumpSuit) {
     if (effectiveLedType === PlayType.PAIR ||
         effectiveLedType === PlayType.CONSEC_PAIRS ||
         effectiveLedType === PlayType.CONSEC_TRIPLES) {
         const pairsAvail = getPairs(handInSuit, trumpSuit);
         if (pairsAvail.length > 0 && n >= 2) return pairsAvail.flat();
-        return handInSuit;
+        return [];
     }
 
     if (effectiveLedType === PlayType.TRIPLE) {
@@ -764,7 +763,7 @@ function _voluntaryScorePool(handInSuit, effectiveLedType, n, trumpSuit) {
         if (triplesAvail.length > 0 && n >= 3) return triplesAvail.flat();
         const pairsAvail = getPairs(handInSuit, trumpSuit);
         if (pairsAvail.length > 0 && n >= 2) return pairsAvail.flat();
-        return handInSuit;
+        return [];
     }
 
     if (effectiveLedType === PlayType.BOMB) {
@@ -775,10 +774,10 @@ function _voluntaryScorePool(handInSuit, effectiveLedType, n, trumpSuit) {
         const pairsAvail = getPairs(handInSuit, trumpSuit);
         if (pairsAvail.length >= 2 && n >= 4) return pairsAvail.flat();
         if (pairsAvail.length >= 1 && n >= 2) return pairsAvail.flat();
-        return handInSuit;
+        return [];
     }
 
-    return handInSuit;
+    return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -865,9 +864,16 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
     if (followInSuit.length > 0 && handInSuit.length > 0) {
-        const pool = _voluntaryScorePool(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
-        const [ok, err] = _checkNoVoluntaryScore(followInSuit, pool, trumpSuit, isBeatingPlay);
-        if (!ok) return [false, err];
+        const groupCards   = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
+        const followGroup  = followInSuit.filter(c => groupCards.includes(c));
+        const followFiller = followInSuit.filter(c => !groupCards.includes(c));
+        const handFiller   = handInSuit.filter(c => !groupCards.includes(c));
+
+        const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
+        if (!groupOk) return [false, groupErr];
+
+        const [fillerOk, fillerErr] = _checkNoVoluntaryScore(followFiller, handFiller, trumpSuit, isBeatingPlay);
+        if (!fillerOk) return [false, fillerErr];
     }
     if (followOffSuit.length > 0) {
         const handOffSuit = hand.filter(c => !handInSuit.includes(c));
