@@ -734,6 +734,54 @@ function _checkNoVoluntaryScore(followCards, pool, trumpSuit, isBeatingPlay) {
 }
 
 // ---------------------------------------------------------------------------
+// Voluntary score pool narrowing
+// ---------------------------------------------------------------------------
+
+/**
+ * 计算"不能主动垫分牌"检查应使用的候选池：当 _validateFollowStructure /
+ * _validateBombFollowStructure 强制玩家使用某个成型组合（对子/三同张/炸弹）时，
+ * 候选池收窄为"手里其他同类型的成型组合"，排除配不成对/三张的零散单张——
+ * 它们从来都不是合法的替代出法，不该被当作"本可以少垫分"的证据。
+ * 分支逐一镜像 _validateFollowStructure / _validateBombFollowStructure 的
+ * 既有强制条件，保证收窄范围与结构规则实际强制的范围完全一致。
+ * @param {Card[]} handInSuit
+ * @param {string} effectiveLedType
+ * @param {number} n - followInSuit.length（本次同花色/主牌实际出牌张数）
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function _voluntaryScorePool(handInSuit, effectiveLedType, n, trumpSuit) {
+    if (effectiveLedType === PlayType.PAIR ||
+        effectiveLedType === PlayType.CONSEC_PAIRS ||
+        effectiveLedType === PlayType.CONSEC_TRIPLES) {
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length > 0 && n >= 2) return pairsAvail.flat();
+        return handInSuit;
+    }
+
+    if (effectiveLedType === PlayType.TRIPLE) {
+        const triplesAvail = getTriples(handInSuit, trumpSuit);
+        if (triplesAvail.length > 0 && n >= 3) return triplesAvail.flat();
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length > 0 && n >= 2) return pairsAvail.flat();
+        return handInSuit;
+    }
+
+    if (effectiveLedType === PlayType.BOMB) {
+        const bombsAvail = getBombs(handInSuit, trumpSuit);
+        if (bombsAvail.length > 0 && n >= 4) return bombsAvail.flat();
+        const triplesAvail = getTriples(handInSuit, trumpSuit);
+        if (triplesAvail.length > 0 && n >= 3) return triplesAvail.flat();
+        const pairsAvail = getPairs(handInSuit, trumpSuit);
+        if (pairsAvail.length >= 2 && n >= 4) return pairsAvail.flat();
+        if (pairsAvail.length >= 1 && n >= 2) return pairsAvail.flat();
+        return handInSuit;
+    }
+
+    return handInSuit;
+}
+
+// ---------------------------------------------------------------------------
 // Main validation entry point
 // ---------------------------------------------------------------------------
 
@@ -817,7 +865,8 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
     if (followInSuit.length > 0 && handInSuit.length > 0) {
-        const [ok, err] = _checkNoVoluntaryScore(followInSuit, handInSuit, trumpSuit, isBeatingPlay);
+        const pool = _voluntaryScorePool(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
+        const [ok, err] = _checkNoVoluntaryScore(followInSuit, pool, trumpSuit, isBeatingPlay);
         if (!ok) return [false, err];
     }
     if (followOffSuit.length > 0) {
