@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { Card, SUIT_SPADES, SUIT_HEARTS, SUIT_CLUBS, SUIT_DIAMONDS } from '../js/card.js';
 import { validateFollow } from '../js/rules.js';
 
@@ -95,7 +95,7 @@ import { validateFollow } from '../js/rules.js';
     assert.equal(ok, true, `三同张回退到"对子+单张"、补位单张别无选择时，不应判违规，实际错误: ${err}`);
 }
 
-// 场景7（BOMB 分支，成型组合+2张补位单张全部被迫打出，无替加解）：
+// 场景7（BOMB 分支，成型组合+2张补位单张全部被迫打出，无替代解）：
 // 同花色恰好4张——一对计分K + 计分5 + 非计分J，凑不出炸弹/三同张/两对，
 // 跟炸弹时4张全部被迫打出。补位单张（5、J）虽然J不计分，但因为是
 // "全部被迫打出"（没有更多同花色牌可选），不应判"主动垫分"。
