@@ -20,3 +20,6 @@ build/
 
 # Git worktrees
 .worktrees/
+
+# Backup files
+*.bak
