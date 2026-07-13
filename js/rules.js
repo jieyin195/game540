@@ -727,7 +727,9 @@ function _checkNoVoluntaryScore(followCards, pool, trumpSuit, isBeatingPlay) {
     const needScore = n - nonScore.length;
     const expected  = scorePool.slice(0, needScore);
     const actual    = followCards.filter(c => c.scoreValue() > 0).sort(scoreSorter);
-    if (actual.length !== expected.length || actual.some((c, i) => c !== expected[i])) {
+    const sameRank = (a, b) =>
+        a.scoreValue() === b.scoreValue() && cardPower(a, trumpSuit) === cardPower(b, trumpSuit);
+    if (actual.length !== expected.length || actual.some((c, i) => !sameRank(c, expected[i]))) {
         return [false, '垫分牌须按分小牌小顺序'];
     }
     return [true, ''];
@@ -778,6 +780,38 @@ function _forcedGroupCards(handInSuit, effectiveLedType, n, trumpSuit) {
     }
 
     return [];
+}
+
+
+/**
+ * 按 pairKey 计数（而非对象引用）把 cards 划分成"命中 requiredCards 名额"
+ * 和"其余"两部分。避免同一 pairKey 有多张物理牌时，_forcedGroupCards
+ * 固定选中的具体对象与玩家实际打出的对象不一致导致误判——只要 pairKey
+ * 相同就算命中名额，不要求是同一个对象。
+ * @param {Card[]} cards
+ * @param {Card[]} requiredCards
+ * @param {string|null} trumpSuit
+ * @returns {[Card[], Card[]]} [matched, rest]
+ */
+function _partitionByPairKeyCounts(cards, requiredCards, trumpSuit) {
+    const remaining = new Map();
+    for (const c of requiredCards) {
+        const key = pairKey(c, trumpSuit);
+        remaining.set(key, (remaining.get(key) ?? 0) + 1);
+    }
+    const matched = [];
+    const rest = [];
+    for (const c of cards) {
+        const key = pairKey(c, trumpSuit);
+        const left = remaining.get(key) ?? 0;
+        if (left > 0) {
+            matched.push(c);
+            remaining.set(key, left - 1);
+        } else {
+            rest.push(c);
+        }
+    }
+    return [matched, rest];
 }
 
 // ---------------------------------------------------------------------------
@@ -864,10 +898,9 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
     if (followInSuit.length > 0 && handInSuit.length > 0) {
-        const groupCards   = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
-        const followGroup  = followInSuit.filter(c => groupCards.includes(c));
-        const followFiller = followInSuit.filter(c => !groupCards.includes(c));
-        const handFiller   = handInSuit.filter(c => !groupCards.includes(c));
+        const groupCards = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
+        const [followGroup, followFiller] = _partitionByPairKeyCounts(followInSuit, groupCards, trumpSuit);
+        const [, handFiller] = _partitionByPairKeyCounts(handInSuit, groupCards, trumpSuit);
 
         const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
         if (!groupOk) return [false, groupErr];
