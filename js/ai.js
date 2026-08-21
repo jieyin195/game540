@@ -12,7 +12,7 @@ import {
     getFollowSuit, filterHandBySuit,
     doesBeat, _canPlayerBeat,
     isConsecutivePairs, pairKey, trumpPairOrder,
-    validateFollow,
+    validateFollow, _consecutiveWindows,
 } from './rules.js';
 
 // ---------------------------------------------------------------------------
@@ -340,6 +340,12 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
 
     const numPairsNeeded = Math.floor(n / 2);
 
+    // 连对/连三同张（n>2）：必须是真正连续的窗口才谈得上"跟对子/压牌"，
+    // 不能像普通对子那样只比较 currentBest 的前两张，单独处理。
+    if (n > 2) {
+        return _followConsecutiveGroups(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, handInSuit, pairsInSuit);
+    }
+
     if (pairsInSuit.length >= numPairsNeeded) {
         // 有足够对子
         if (trickHasScore) {
@@ -360,27 +366,105 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
             cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
         );
         return [...smallest];
-    } else {
-        // 对子不足，能出几对就出几对，剩余用单张补
-        const result = [];
-        const usedCards = new Set();
-        for (const pair of pairsInSuit) {
-            result.push(...pair);
-            for (const c of pair) usedCards.add(c);
-        }
-        const remainingNeeded = n - result.length;
-        const fillers = (handInSuit.length ? handInSuit : hand)
-            .filter(c => !usedCards.has(c))
-            .slice(0, remainingNeeded);
-        result.push(...fillers);
-        if (result.length < n) {
-            const more = hand
-                .filter(c => !result.includes(c))
-                .slice(0, n - result.length);
-            result.push(...more);
-        }
-        return result.slice(0, n);
     }
+
+    // 同花色对子不够（含完全没有该花色的情况）：本墩有分时，"有分必压"允许改用主牌压牌。
+    // 只处理最常见的单对（n===2）——连对/连三同张在同花色不够时改用主牌连续窗口是更少见
+    // 的边界情况，这里不展开，留给规则引擎的 _canPlayerBeat 兜底校验去挡。
+    if (n === 2 && trickHasScore && ledSuit !== 'trump') {
+        const trumpPairs = getPairs(filterHandBySuit(hand, 'trump', trumpSuit), trumpSuit);
+        const canBeat = trumpPairs.filter(p => doesBeat([...p], currentBest.slice(0, 2), trumpSuit));
+        if (canBeat.length) {
+            const bestPair = canBeat.reduce((a, b) =>
+                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+            );
+            return [...bestPair];
+        }
+    }
+
+    // 对子不足，能出几对就出几对，剩余用单张补（优先补不含分值的牌，避免主动垫分）
+    const result = [];
+    const usedCards = new Set();
+    for (const pair of pairsInSuit) {
+        result.push(...pair);
+        for (const c of pair) usedCards.add(c);
+    }
+    const remainingNeeded = n - result.length;
+    const fillerPool = (handInSuit.length ? handInSuit : hand).filter(c => !usedCards.has(c));
+    const fillers = _pickDiscard(fillerPool, remainingNeeded, trumpSuit);
+    result.push(...fillers);
+    for (const c of fillers) usedCards.add(c);
+    if (result.length < n) {
+        const more = _pickDiscard(hand.filter(c => !usedCards.has(c)), n - result.length, trumpSuit);
+        result.push(...more);
+    }
+    return result.slice(0, n);
+}
+
+/**
+ * 跟连对/连三同张（ledCards 的牌型是 CONSEC_PAIRS 或 CONSEC_TRIPLES，n>2）。
+ * 与普通对子不同，压牌必须是真正连续的同组窗口（用 rules.js 的 _consecutiveWindows
+ * 判定，和 _canPlayerBeat/validateFollow 用的是同一套逻辑，避免两边判断不一致）。
+ * @param {Card[]} hand
+ * @param {Card[]} ledCards
+ * @param {Card[]} currentBest
+ * @param {string|null} trumpSuit
+ * @param {boolean} trickHasScore
+ * @param {number} n
+ * @param {Card[]} handInSuit
+ * @param {Array<Card[]>} pairsInSuit
+ * @returns {Card[]}
+ */
+function _followConsecutiveGroups(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, handInSuit, pairsInSuit) {
+    const ledType    = getPlayType(ledCards, trumpSuit);
+    const groupSize  = ledType === PlayType.CONSEC_TRIPLES ? 3 : 2;
+    const windowCount = n / groupSize;
+
+    // 同花色牌不够时，规则允许改用主牌；没有主牌也没同花色时退回同花色池（会是空数组）
+    const pool   = handInSuit.length > 0 ? handInSuit : filterHandBySuit(hand, 'trump', trumpSuit);
+    const groups = groupSize === 2 ? getPairs(pool, trumpSuit) : getTriples(pool, trumpSuit);
+    const windows = _consecutiveWindows(groups, trumpSuit, windowCount);
+
+    if (windows.length) {
+        if (trickHasScore) {
+            const beatWindows = windows.filter(w => doesBeat(w, currentBest, trumpSuit));
+            if (beatWindows.length) {
+                return beatWindows.reduce((a, b) =>
+                    cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+                );
+            }
+        }
+        // 垫最小的连续窗口：优先选完全不含分牌的窗口，避免明明有不含分的合法
+        // 连续窗口可选，却因为牌面更小选了含分牌的窗口，触发"不能主动垫分牌"
+        const nonScoreWindows = windows.filter(w => !w.some(c => c.scoreValue() > 0));
+        const candidates = nonScoreWindows.length ? nonScoreWindows : windows;
+        return candidates.reduce((a, b) =>
+            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+        );
+    }
+
+    // 凑不出真正连续的窗口：能出几组同花色对子/3同张就出几组（优先用不含分值的组，
+    // 分牌组只在不含分的组不够时才补上），剩余用不含分值的散牌补
+    const result = [];
+    const usedCards = new Set();
+    const rawGroups = groupSize === 2 ? pairsInSuit : getTriples(handInSuit, trumpSuit);
+    const byGroupPower = (a, b) => cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit);
+    const nonScoreGroups = rawGroups.filter(g => g[0].scoreValue() === 0).sort(byGroupPower);
+    const scoreGroups    = rawGroups.filter(g => g[0].scoreValue() > 0).sort(byGroupPower);
+    const groupsToUse = [...nonScoreGroups, ...scoreGroups];
+    for (const g of groupsToUse.slice(0, windowCount)) {
+        result.push(...g);
+        for (const c of g) usedCards.add(c);
+    }
+    const fillerPool = (handInSuit.length ? handInSuit : hand).filter(c => !usedCards.has(c));
+    const fillers = _pickDiscard(fillerPool, n - result.length, trumpSuit);
+    result.push(...fillers);
+    for (const c of fillers) usedCards.add(c);
+    if (result.length < n) {
+        const more = _pickDiscard(hand.filter(c => !usedCards.has(c)), n - result.length, trumpSuit);
+        result.push(...more);
+    }
+    return result.slice(0, n);
 }
 
 /**
@@ -445,19 +529,53 @@ function _pickDiscard(hand, n, trumpSuit) {
         .sort((a, b) => cardPower(a, trumpSuit) - cardPower(b, trumpSuit))
         .slice(0, n);
 
-    const result = [...nonScore];
+    let result = [...nonScore];
     if (result.length < n) {
         const scoreCards = hand
             .filter(c => c.scoreValue() > 0)
             .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)));
         result.push(...scoreCards.slice(0, n - result.length));
     }
-    return result.slice(0, n);
+    result = result.slice(0, n);
+
+    // 避免"随手垫牌"意外凑成炸弹（4张完全相同的牌）：垫牌只是单纯垫，凑成炸弹
+    // 会让这手牌被当成炸弹校验（比如副牌炸弹只能炸同花色），和垫牌的本意不符。
+    if (result.length === 4) {
+        const counts = new Map();
+        for (const c of result) {
+            const k = pairKey(c, trumpSuit);
+            counts.set(k, (counts.get(k) ?? 0) + 1);
+        }
+        if ([...counts.values()].some(cnt => cnt === 4)) {
+            const used = new Set(result);
+            const alt = [...hand]
+                .filter(c => !used.has(c))
+                .sort((a, b) => (a.scoreValue() - b.scoreValue()) || (cardPower(a, trumpSuit) - cardPower(b, trumpSuit)))[0];
+            if (alt) result[3] = alt;
+        }
+    }
+    return result;
+}
+
+/**
+ * 从一组牌组（对子/3同张/炸弹）中选"最小"的一组，优先选不含分值的牌组，
+ * 只有全是分牌组时才退而选分值最小的。避免结构化垫牌为了凑牌型主动垫出分牌
+ * （即便牌面更小），违反"不能主动垫分牌"规则。
+ * @param {Card[][]} groups
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function _smallestPreferNonScore(groups, trumpSuit) {
+    const nonScore = groups.filter(g => g[0].scoreValue() === 0);
+    const candidates = nonScore.length ? nonScore : groups;
+    return candidates.reduce((a, b) =>
+        cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
 }
 
 /**
  * 按"垫最接近相同的牌"原则选垫牌。
  * 层级：炸弹 > 3同张+1 > 2对 > 1对+2单 > 全单张。
+ * 同一档位内优先选不含分值的组合，避免为了凑结构主动垫出分牌。
  * @param {Card[]} pool - 优先取牌池（同花色牌）
  * @param {Card[]} fullHand - 全部手牌（pool不足时补充）
  * @param {number} n - 需要的总张数
@@ -470,38 +588,35 @@ function _pickStructuredDiscard(pool, fullHand, n, trumpSuit) {
 
     const _add = (cards) => { for (const c of cards) { result.push(c); used.add(c); } };
 
-    if (n >= 4) {
+    if (n === 4) {
+        // 炸弹固定4张，n>4（比如连对/连三同张的兜底）时炸弹凑不满张数，交给后面的层级处理
         const bombs = getBombs(pool, trumpSuit);
         if (bombs.length) {
-            const smallest = bombs.reduce((a, b) =>
-                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
-            _add(smallest);
+            _add(_smallestPreferNonScore(bombs, trumpSuit));
             return result.slice(0, n);
         }
     }
     if (n >= 3) {
         const triples = getTriples(pool, trumpSuit);
         if (triples.length) {
-            const smallest = triples.reduce((a, b) =>
-                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
-            _add(smallest);
+            _add(_smallestPreferNonScore(triples, trumpSuit));
         }
     }
     if (result.length === 0 && n >= 4) {
         const pairs = getPairs(pool, trumpSuit);
         if (pairs.length >= 2) {
-            const sorted = [...pairs].sort((a, b) =>
-                cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit));
-            _add(sorted[0]);
-            _add(sorted[1]);
+            const byPower  = (a, b) => cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit);
+            const nonScore = pairs.filter(p => p[0].scoreValue() === 0).sort(byPower);
+            const scored   = pairs.filter(p => p[0].scoreValue() > 0).sort(byPower);
+            const ordered  = [...nonScore, ...scored]; // 优先用不含分值的对子凑够2对，不够再补分牌对子
+            _add(ordered[0]);
+            _add(ordered[1]);
         }
     }
     if (result.length === 0 && n >= 2) {
         const pairs = getPairs(pool, trumpSuit);
         if (pairs.length >= 1) {
-            const smallest = pairs.reduce((a, b) =>
-                cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
-            _add(smallest);
+            _add(_smallestPreferNonScore(pairs, trumpSuit));
         }
     }
 

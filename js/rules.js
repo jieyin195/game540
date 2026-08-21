@@ -491,7 +491,7 @@ const _SUIT_CN = {
  * @param {number} windowCount - Size of consecutive window to find
  * @returns {Array<Array<Card>>} Array of consecutive windows, each flattened to a card array
  */
-function _consecutiveWindows(groups, trumpSuit, windowCount) {
+export function _consecutiveWindows(groups, trumpSuit, windowCount) {
     const withOrder = groups
         .map(g => ({ group: g, order: trumpPairOrder(g, trumpSuit) }))
         .filter(x => x.order >= 0)
@@ -721,16 +721,70 @@ function _checkNoVoluntaryScore(followCards, pool, trumpSuit, isBeatingPlay) {
     const n = followCards.length;
     const nonScore = pool.filter(c => c.scoreValue() === 0);
     if (nonScore.length >= n) return [false, '不能主动垫分牌'];
-    const scoreSorter = (a, b) =>
-        a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit);
-    const scorePool = pool.filter(c => c.scoreValue() > 0).sort(scoreSorter);
     const needScore = n - nonScore.length;
-    const expected  = scorePool.slice(0, needScore);
-    const actual    = followCards.filter(c => c.scoreValue() > 0).sort(scoreSorter);
-    const sameRank = (a, b) =>
-        a.scoreValue() === b.scoreValue() && cardPower(a, trumpSuit) === cardPower(b, trumpSuit);
-    if (actual.length !== expected.length || actual.some((c, i) => !sameRank(c, expected[i]))) {
+
+    // "分小牌小顺序"比较的是分值本身，不同花色的副牌之间本就"无大小之分、
+    // 先出者大"（规则2.2），不该用 cardPower（那只是同花色/主牌内部排序用的
+    // 数值，见其函数注释）在分值相同时强行分出谁"更小"——分值相同的牌里，
+    // 打出任意一张都算数，只要打出的分值多重集合是池子里能凑到的最小分值组合。
+    const scoreValuesAsc = a => [...a].sort((x, y) => x - y);
+    const scorePool      = pool.filter(c => c.scoreValue() > 0).map(c => c.scoreValue());
+    const expectedScores = scoreValuesAsc(scorePool).slice(0, needScore);
+    const actualScores   = scoreValuesAsc(followCards.filter(c => c.scoreValue() > 0).map(c => c.scoreValue()));
+
+    if (actualScores.length !== expectedScores.length ||
+        actualScores.some((v, i) => v !== expectedScores[i])) {
         return [false, '垫分牌须按分小牌小顺序'];
+    }
+    return [true, ''];
+}
+
+/**
+ * 连对/连三同张专用的"不能主动垫分牌"检查。
+ *
+ * 连对子的"可选方案"是一个个完整的连续窗口，不是任意几张同花色对子/三同张的
+ * 自由组合——两个不相邻的窗口哪怕各自都不含分，把它们的牌拼起来也不代表
+ * 玩家真能打出这个组合（这正是 _forcedGroupCards 用"所有可选窗口的并集"
+ * 当作候选池会算错的地方：并集里可能包含两个本身互不相邻、凑不成新连续
+ * 窗口的牌）。所以只能对"整个窗口"求比较：玩家实际打出的这个窗口的总分值，
+ * 是否已经是所有真正连续、张数相同的窗口里最小的。若还有总分更小（或不含分）
+ * 的窗口没打，才算主动垫分。
+ * 同花色牌不够、凑不满完整对子/三同张时，followInSuit 里会混入配不成组的散牌
+ * （比如3对+1张单牌）——这部分散牌不属于"窗口"比较的范围，单独按普通垫牌规则
+ * （对照同花色里没被窗口用到的牌）检查，避免把散牌的分值错算进窗口总分里、
+ * 拿一个根本不对等的"5张 vs 4张窗口"比较来误判。
+ * @param {Card[]} followInSuit - 跟牌里属于领出花色/主牌的部分
+ * @param {Card[]} handInSuit - 手牌里属于领出花色/主牌的部分
+ * @param {string} effectiveLedType - PlayType.CONSEC_PAIRS 或 PlayType.CONSEC_TRIPLES
+ * @param {string|null} trumpSuit
+ * @returns {[boolean, string]}
+ */
+function _checkConsecutiveNoVoluntaryScore(followInSuit, handInSuit, effectiveLedType, trumpSuit) {
+    const groupSize = effectiveLedType === PlayType.CONSEC_TRIPLES ? 3 : 2;
+
+    // 只把 followInSuit 里真正凑成完整对子/三同张的部分当"窗口"比较；
+    // 凑不成组的散牌走下面的通用垫分检查。
+    const followGroups     = _groupCards(followInSuit, trumpSuit);
+    const matchedGroups    = [...followGroups.values()].filter(g => g.length >= groupSize);
+    const matchedCards     = matchedGroups.flatMap(g => g.slice(0, groupSize));
+    const matchedCardSet   = new Set(matchedCards);
+    const leftover         = followInSuit.filter(c => !matchedCardSet.has(c));
+    const windowCount      = matchedGroups.length;
+
+    if (windowCount >= 2) {
+        const groups  = groupSize === 2 ? getPairs(handInSuit, trumpSuit) : getTriples(handInSuit, trumpSuit);
+        const windows = _consecutiveWindows(groups, trumpSuit, windowCount);
+        if (windows.length > 0) {
+            const totalScore  = cards => cards.reduce((sum, c) => sum + c.scoreValue(), 0);
+            const minScore    = Math.min(...windows.map(totalScore));
+            const playedScore = totalScore(matchedCards);
+            if (playedScore > minScore) return [false, '不能主动垫分牌'];
+        }
+    }
+
+    if (leftover.length > 0) {
+        const handFiller = handInSuit.filter(c => !matchedCardSet.has(c));
+        return _checkNoVoluntaryScore(leftover, handFiller, trumpSuit, false);
     }
     return [true, ''];
 }
@@ -755,6 +809,9 @@ function _forcedGroupCards(handInSuit, effectiveLedType, n, trumpSuit) {
     if (effectiveLedType === PlayType.PAIR ||
         effectiveLedType === PlayType.CONSEC_PAIRS ||
         effectiveLedType === PlayType.CONSEC_TRIPLES) {
+        // 连对/连三同张这里用普通对子/三同张的宽松口径（不要求真正连续）——
+        // 真正需要"连续窗口"精度的检查在 _checkConsecutiveNoVoluntaryScore 里单独做，
+        // 这个函数只用于兜底/PAIR 这种不涉及连续性的场景。
         const pairsAvail = getPairs(handInSuit, trumpSuit);
         if (pairsAvail.length > 0 && n >= 2) return pairsAvail.flat();
         return [];
@@ -898,15 +955,23 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
     if (followInSuit.length > 0 && handInSuit.length > 0) {
-        const groupCards = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
-        const [followGroup, followFiller] = _partitionByPairKeyCounts(followInSuit, groupCards, trumpSuit);
-        const [, handFiller] = _partitionByPairKeyCounts(handInSuit, groupCards, trumpSuit);
+        if (!isBeatingPlay &&
+            (effectiveLedType === PlayType.CONSEC_PAIRS || effectiveLedType === PlayType.CONSEC_TRIPLES)) {
+            // 连对/连三同张：可选方案是完整的连续窗口，不是任意同花色对子/三同张
+            // 的自由拼凑，用专门的窗口级比较，见 _checkConsecutiveNoVoluntaryScore 注释。
+            const [consecOk, consecErr] = _checkConsecutiveNoVoluntaryScore(followInSuit, handInSuit, effectiveLedType, trumpSuit);
+            if (!consecOk) return [false, consecErr];
+        } else {
+            const groupCards = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
+            const [followGroup, followFiller] = _partitionByPairKeyCounts(followInSuit, groupCards, trumpSuit);
+            const [, handFiller] = _partitionByPairKeyCounts(handInSuit, groupCards, trumpSuit);
 
-        const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
-        if (!groupOk) return [false, groupErr];
+            const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
+            if (!groupOk) return [false, groupErr];
 
-        const [fillerOk, fillerErr] = _checkNoVoluntaryScore(followFiller, handFiller, trumpSuit, isBeatingPlay);
-        if (!fillerOk) return [false, fillerErr];
+            const [fillerOk, fillerErr] = _checkNoVoluntaryScore(followFiller, handFiller, trumpSuit, isBeatingPlay);
+            if (!fillerOk) return [false, fillerErr];
+        }
     }
     if (followOffSuit.length > 0) {
         const handOffSuit = hand.filter(c => !handInSuit.includes(c));
