@@ -1195,7 +1195,12 @@ export class GameRenderer {
             if (aIsTrump && !bIsTrump) return -1;
             if (!aIsTrump && bIsTrump) return 1;
             if (aIsTrump && bIsTrump) {
-                return cardPower(b, trump) - cardPower(a, trump);
+                const powerDiff = cardPower(b, trump) - cardPower(a, trump);
+                if (powerDiff !== 0) return powerDiff;
+                // 同一档位（如副10之间、副2之间）大小相同，按花色分组，避免同档花色散开
+                const aSuit = suitOrder[a.suit] ?? 5;
+                const bSuit = suitOrder[b.suit] ?? 5;
+                return aSuit - bSuit;
             }
             const aSuit = suitOrder[a.suit] ?? 5;
             const bSuit = suitOrder[b.suit] ?? 5;
