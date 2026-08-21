@@ -11,7 +11,7 @@ import {
     getFollowSuit, filterHandBySuit,
     getPairs, getTriples, getBombs,
     mustLeadPairOrBiggest, getPadCards,
-    validateFollow, doesBeat, _canPlayerBeat,
+    validateFollow, doesBeat, _canPlayerBeat, canBeatSingle,
 } from './rules.js';
 
 // ---------------------------------------------------------------------------
@@ -117,6 +117,12 @@ export class GameState {
         /** @type {string|null} */
         this.pendingAction   = null;  // AI待执行动作
 
+        // 规则三扩展：领出者无对子、被迫出的最大单张确实打不过别人手里的牌时，
+        // 由下一个本局还没出过牌的玩家帮领出者随机抽一张代打，防止领出者自行挑牌"作弊"。
+        // 每次 _startTrick 后若触发，记录本次触发信息供 UI 展示一次；未触发为 null。
+        /** @type {{leaderIdx: number, drawerIdx: number, card: Card}|null} */
+        this.forcedLeadInfo  = null;
+
         // 反主牌必出：反主成功后这些牌必须在第一次领出时打出
         /** @type {Card[]} */
         this.mustPlayCards   = [];
@@ -170,6 +176,7 @@ export class GameState {
         this.trickCardCount = 0;
         this.trickWinner    = -1;
         this.allTricksDone  = false;
+        this.forcedLeadInfo = null;
         this.message        = '叫主阶段：请各玩家决定是否叫主';
     }
 
@@ -263,6 +270,64 @@ export class GameState {
         this.firstPlayer  = firstPlayer;
         this.trickWinner  = -1;
         this.message      = `${this.players[firstPlayer].name} 先出牌`;
+
+        this.forcedLeadInfo = this._tryForcedRandomLead(firstPlayer);
+    }
+
+    /**
+     * 规则三扩展："领出者无对子、被迫出的最大单张打不过别人手里的牌"时，
+     * 由领出者之后第一个本局还没出过牌的玩家，从领出者手里随机抽一张牌代为打出
+     * （只出这一张单张），防止领出者自行挑选具体是哪张牌。
+     *
+     * 判定顺序（先做便宜的检查，短路掉多数不适用的情况）：
+     * 1. 本局是否还有其他玩家一次牌都没出过——没有的话直接跳过，规则三本身也已经解除
+     * 2. 反主牌必出还没执行完——那个规则优先级更高，领出者必须先打反主的牌，不适用本规则
+     * 3. 领出者手里有没有对子（含3同张/连对等）——有对子就轮不到"最大单张"这一分支
+     * 4. 领出者手里最大的单张，是否真的打不过另外两人手里现有的牌
+     *
+     * @param {number} leaderIdx
+     * @returns {{leaderIdx: number, drawerIdx: number, card: Card}|null}
+     * @private
+     */
+    _tryForcedRandomLead(leaderIdx) {
+        const anyUnplayed = this.players.some((p, i) => i !== leaderIdx && !p.hasPlayed);
+        if (!anyUnplayed) return null;
+
+        if (leaderIdx === this.trumpCaller && this.mustPlayCards.length > 0) return null;
+
+        const leader = this.players[leaderIdx];
+        if (leader.hand.length === 0) return null;
+        if (getPairs(leader.hand, this.trumpSuit).length > 0) return null;
+
+        const best = leader.hand.reduce((b, c) =>
+            cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
+        );
+
+        const beatable = this.players.some((p, i) =>
+            i !== leaderIdx && p.hand.some(c => canBeatSingle(c, best, this.trumpSuit))
+        );
+        if (!beatable) return null;
+
+        let drawerIdx = -1;
+        for (let offset = 1; offset <= 2; offset++) {
+            const idx = (leaderIdx + offset) % 3;
+            if (!this.players[idx].hasPlayed) { drawerIdx = idx; break; }
+        }
+        if (drawerIdx === -1) return null; // 理论上不会发生（anyUnplayed 已保证存在）
+
+        const randIdx    = Math.floor(Math.random() * leader.hand.length);
+        const drawnCard  = leader.hand[randIdx];
+
+        drawnCard.playOrder = 0;
+        this.trickCardCount = 1;
+        this.currentTrick.push(new TrickEntry(leaderIdx, [drawnCard]));
+        leader.removeCards([drawnCard]);
+        leader.hasPlayed = true;
+
+        const drawerName = this.players[drawerIdx].name;
+        this.message = `${leader.name} 的单张打不过别人，${drawerName} 帮他随机抽出: ${drawnCard.displayName()}`;
+
+        return { leaderIdx, drawerIdx, card: drawnCard };
     }
 
     /**

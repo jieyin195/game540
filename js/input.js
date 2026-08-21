@@ -19,6 +19,23 @@ function cardsCn(cards) {
     return cards.map(c => c.displayName()).join(' ');
 }
 
+/**
+ * 若本轮触发了"规则三扩展"（领出者无对子、最大单张打不过别人，由下一个未出牌玩家
+ * 帮他随机抽一张代打），展示对应消息。触发信息只展示一次（读取后立即清空）。
+ * @param {import('./renderer.js').GameRenderer} renderer
+ * @param {import('./game.js').GameState} game
+ */
+function _reportForcedLead(renderer, game) {
+    const info = game.forcedLeadInfo;
+    if (!info) return;
+    game.forcedLeadInfo = null;
+    const leaderName  = game.players[info.leaderIdx].name;
+    const drawerName  = game.players[info.drawerIdx].name;
+    renderer.addMessage(
+        `${leaderName} 没有对子，最大单张打不过别人，由 ${drawerName} 代抽一张出牌: ${info.card.displayName()}`
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Hit test helpers (private)
 // ---------------------------------------------------------------------------
@@ -344,6 +361,7 @@ export function updateGame(renderer) {
             } else {
                 game.startNextTrick();
                 renderer._sortHumanHand();
+                _reportForcedLead(renderer, game);
                 renderer.aiPending  = false;
                 renderer.aiActionTime = 0;
             }
@@ -458,6 +476,7 @@ function _advanceCallTurn(renderer, game) {
             renderer.callPhase = 'idle';
             renderer._sortHumanHand();
             renderer.addMessage('无人叫主，常主模式');
+            _reportForcedLead(renderer, game);
         } else if (renderer.callPhase === 'calling' && game.trumpCaller !== -1) {
             // Someone called during initial round, start counter
             _startCounterRound(renderer, game, game.trumpCaller);
@@ -467,6 +486,7 @@ function _advanceCallTurn(renderer, game) {
             renderer.callPhase = 'idle';
             renderer._sortHumanHand();
             renderer.addMessage(game.message);
+            _reportForcedLead(renderer, game);
         }
         return;
     }
