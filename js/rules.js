@@ -517,9 +517,18 @@ export function _consecutiveWindows(groups, trumpSuit, windowCount) {
  */
 export function _canPlayerBeat(hand, currentBest, ledCards, trumpSuit) {
     if (!currentBest || currentBest.length === 0) return false;
+    const ledType = getPlayType(ledCards, trumpSuit);
+
+    // 炸弹不受"同花色/主牌"取牌池限制——手里任意一组炸弹都是候选，具体能不能
+    // 压过（主牌炸弹可炸任意4张以内的牌，副牌炸弹只能炸同花色的牌）交给
+    // doesBeat 统一判断。之前这里没有 BOMB 分支，会落到最后的单张兜底比较，
+    // 单张永远无法匹配炸弹牌型，导致"有炸弹也判断不能压"的漏判。
+    if (ledType === PlayType.BOMB) {
+        return getBombs(hand, trumpSuit).some(b => doesBeat(b, currentBest, trumpSuit));
+    }
+
     const ledSuit    = getFollowSuit(ledCards, trumpSuit);
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
-    const ledType    = getPlayType(ledCards, trumpSuit);
     // 有该花色牌只能用该花色试；没有该花色牌时改用主牌试（若ledSuit本身就是'trump'，两者相同）
     const pool = handInSuit.length > 0 ? handInSuit : filterHandBySuit(hand, 'trump', trumpSuit);
 
@@ -1036,18 +1045,30 @@ export function getPadCards(hand, originalPlay, trumpSuit) {
     return pad.slice(0, nPad);
 }
 
+/**
+ * 从一组牌组（对子/三同张）中挑一组用来垫牌：优先选不含分值的组，避免为了
+ * 凑结构主动垫出分牌；全是分牌组时才退而选其中一组。
+ * @param {Array<Card[]>} groups
+ * @returns {Card[]}
+ */
+function _pickPadGroup(groups) {
+    const nonScore = groups.filter(g => g[0].scoreValue() === 0);
+    return nonScore.length > 0 ? nonScore[0] : groups[0];
+}
+
 function _pickPadFromPool(pool, n, trumpSuit) {
     if (!pool.length || n <= 0) return [];
     if (n >= 3) {
         const triples = getTriples(pool, trumpSuit);
-        if (triples.length > 0) return triples[0].slice(0, 3);
+        if (triples.length > 0) return _pickPadGroup(triples).slice(0, 3);
     }
     if (n >= 2) {
         const pairs = getPairs(pool, trumpSuit);
         if (pairs.length > 0) {
-            const pair = [...pairs[0]];
+            const pair = [..._pickPadGroup(pairs)];
             if (n === 2) return pair;
-            const remaining = pool.filter(c => !pair.includes(c));
+            const remaining = [...pool.filter(c => !pair.includes(c))]
+                .sort((a, b) => a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
             if (remaining.length > 0) return [...pair, remaining[0]];
             return pair;
         }

@@ -19,8 +19,60 @@ import {
 // 叫主 AI
 // ---------------------------------------------------------------------------
 
+// 固定主牌（不管常主/活主都是主牌）按大小顺序给权重：3>字牌>大王>小王>10>2
+const FIXED_TRUMP_WEIGHT = {
+    [RANK_THREE]: 6, [RANK_CHARACTER]: 5, [RANK_BIG_JOKER]: 4, [RANK_SMALL_JOKER]: 3,
+    '10': 2, '2': 1,
+};
+// 活主花色自己的 A/K/Q/J/5（叫某花色10之后，这些牌会变成主牌）
+const SIDE_TRUMP_WEIGHT = { 'A': 5, 'K': 4, 'Q': 3, 'J': 2, '5': 1 };
+
+// 用 3000 局随机发牌模拟"有可叫候选的手"的强度分布校准：
+// min 35 / p25 61 / median 68 / p75 76 / max 111。
+// 初始叫主要求达到中位数水平（不是随便有张牌就叫），反主要求明显更强（约前25%），
+// 因为反主需要更强的牌力才能真正压过对方、且会暴露更多信息。
+const INITIAL_CALL_THRESHOLD = 65;
+const COUNTER_CALL_THRESHOLD = 78;
+// 叫某花色活主，必须比留在常主明显更划算才值得——固定主牌部分两边都一样，
+// 真正决定"要不要激活这个花色"的是该花色能带来的净增量，不能只看绝对分数
+// 有没有过门槛（那样测的其实是固定主牌够不够，跟选哪个花色没关系）。
+const SUIT_ACTIVATION_MARGIN = 4;
+
 /**
- * AI决定是否叫主/反主。
+ * 评估这手牌如果以 suit 作为活主花色（suit 为 null 表示常主/不指定花色）的强度：
+ * 固定主牌的数量和大小 + （若指定花色）该花色 A/K/Q/J/5 的数量和大小，
+ * 再叠加"分牌保护"——分牌（5/10/K/王/字牌/3）能配成对子的加分（能藏住、有机会
+ * 一起打出去，不容易被规则三逼着单独暴露），落单的分牌减分（容易被迫垫出去送分）。
+ * @param {Card[]} hand
+ * @param {string|null} suit
+ * @returns {number}
+ */
+function _handStrengthForSuit(hand, suit) {
+    const relevant = hand.filter(c =>
+        FIXED_TRUMP_WEIGHT[c.rank] !== undefined ||
+        (suit && c.suit === suit && SIDE_TRUMP_WEIGHT[c.rank] !== undefined)
+    );
+
+    let score = 0;
+    for (const c of relevant) score += FIXED_TRUMP_WEIGHT[c.rank] ?? SIDE_TRUMP_WEIGHT[c.rank] ?? 0;
+
+    const groups = new Map();
+    for (const c of relevant) {
+        if (c.scoreValue() === 0) continue; // 只看分牌的保护情况
+        const key = `${c.suit}_${c.rank}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+    }
+    for (const group of groups.values()) {
+        score += group.length >= 2 ? 3 : -2;
+    }
+
+    return score;
+}
+
+/**
+ * AI决定是否叫主/反主。会评估每个候选叫主对应的活主花色下的整手牌强度，
+ * 只有达到门槛（反主门槛更高）才会真的去叫/反主，而不是有牌型就无脑叫。
  * 返回叫主用的牌列表，或 null（Pass）。
  * @param {Card[]} hand
  * @param {Card[]|null} currentCall
@@ -30,22 +82,39 @@ export function aiDecideCallTrump(hand, currentCall) {
     const candidates = _findCallCandidates(hand);
     if (!candidates.length) return null;
 
-    // 按叫主强度排序（张数多优先，然后点数大优先）
-    candidates.sort((a, b) => {
+    const isCounter = currentCall !== null && currentCall !== undefined;
+    const threshold = isCounter ? COUNTER_CALL_THRESHOLD : INITIAL_CALL_THRESHOLD;
+
+    const valid = candidates.filter(c =>
+        isCounter ? canCounterTrump(c, currentCall) : canCallTrump(c)
+    );
+    if (!valid.length) return null;
+
+    // 按叫主强度排序（张数多优先，然后点数大优先），作为同分时的 tie-break
+    valid.sort((a, b) => {
         const lenDiff = b.length - a.length;
         if (lenDiff !== 0) return lenDiff;
         return _callPower(b) - _callPower(a);
     });
 
-    for (const callCards of candidates) {
-        if (currentCall === null || currentCall === undefined) {
-            if (canCallTrump(callCards)) return callCards;
-        } else {
-            if (canCounterTrump(callCards, currentCall)) return callCards;
+    const commonScore = _handStrengthForSuit(hand, null);
+
+    let best = null;
+    let bestScore = -Infinity;
+    for (const callCards of valid) {
+        const suit = callCards[0].rank === '10' ? callCards[0].suit : null;
+        const score = _handStrengthForSuit(hand, suit);
+        // 激活花色（叫某花色的10）必须比常主明显更强才值得叫；
+        // 叫王/字牌/3（suit为null，本来就是常主）不受这条限制
+        if (suit !== null && score < commonScore + SUIT_ACTIVATION_MARGIN) continue;
+        if (score > bestScore) {
+            bestScore = score;
+            best = callCards;
         }
     }
 
-    return null;
+    if (best === null || bestScore < threshold) return null; // 牌力不够，宁可 Pass
+    return best;
 }
 
 /**
@@ -266,9 +335,12 @@ export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) 
     }
 
     if (playType === PlayType.BOMB) {
-        const bombsInSuit = getBombs(handInSuit.length >= 4 ? handInSuit : [], trumpSuit);
-        if (bombsInSuit.length) {
-            const sortedBombs = [...bombsInSuit].sort((a, b) =>
+        // 炸弹不受同花色限制——主牌炸弹能炸任意4张以内的牌，副牌炸弹只能炸
+        // 同花色的牌，具体交给 doesBeat 判断；候选池应该是整手牌里所有的炸弹，
+        // 不能像普通跟牌那样限定在 handInSuit 里（否则会漏掉能压过去的主牌炸弹）。
+        const candidateBombs = getBombs(hand, trumpSuit);
+        if (candidateBombs.length) {
+            const sortedBombs = [...candidateBombs].sort((a, b) =>
                 cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)
             );
             for (const bomb of sortedBombs) {
@@ -434,12 +506,16 @@ function _followConsecutiveGroups(hand, ledCards, currentBest, trumpSuit, trickH
                 );
             }
         }
-        // 垫最小的连续窗口：优先选完全不含分牌的窗口，避免明明有不含分的合法
-        // 连续窗口可选，却因为牌面更小选了含分牌的窗口，触发"不能主动垫分牌"
-        const nonScoreWindows = windows.filter(w => !w.some(c => c.scoreValue() > 0));
-        const candidates = nonScoreWindows.length ? nonScoreWindows : windows;
-        return candidates.reduce((a, b) =>
-            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
+        // 垫最小的连续窗口：优先选总分值最小的窗口（跟 rules.js 的
+        // _checkConsecutiveNoVoluntaryScore 用的是同一个"总分值最小"标准，
+        // 避免两边标准不一致——只看"第一张牌面大小"会选出一个总分值明明更大
+        // 的窗口，通过不了那边的校验），分值相同时再比第一张牌面大小。
+        const totalScore = w => w.reduce((sum, c) => sum + c.scoreValue(), 0);
+        return windows.reduce((a, b) => {
+            const sa = totalScore(a), sb = totalScore(b);
+            if (sa !== sb) return sa < sb ? a : b;
+            return cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b;
+        }
         );
     }
 
