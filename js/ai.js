@@ -433,11 +433,8 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
                 return [...bestPair];
             }
         }
-        // 垫最小对子
-        const smallest = pairsInSuit.reduce((a, b) =>
-            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
-        );
-        return [...smallest];
+        // 垫最小对子（优先不含分值的对子，避免明明有不算分的对子可选却垫了分牌对子）
+        return [..._smallestPreferNonScore(pairsInSuit, trumpSuit)];
     }
 
     // 同花色对子不够（含完全没有该花色的情况）：本墩有分时，"有分必压"允许改用主牌压牌。
@@ -568,9 +565,8 @@ function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 
                 );
             }
         }
-        return triples.reduce((a, b) =>
-            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b
-        );
+        // 优先不含分值的三同张，避免明明有不算分的三同张可选却垫了分牌三同张
+        return _smallestPreferNonScore(triples, trumpSuit);
     }
 
     // 无3同张：用对子+单张或3单张
@@ -585,9 +581,14 @@ function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 
  */
 function _pickSmallestCard(cards, trumpSuit) {
     const nonScore = cards.filter(c => c.scoreValue() === 0);
-    const pool = nonScore.length ? nonScore : cards;
-    return pool.reduce((a, b) =>
-        cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b
+    if (nonScore.length) {
+        return nonScore.reduce((a, b) => cardPower(a, trumpSuit) < cardPower(b, trumpSuit) ? a : b);
+    }
+    // 全是分牌时，必须按"分小牌小顺序"——先比分值（5分 < 10分），
+    // 分值相同时才用 cardPower 兜底（不代表真实大小关系，只是随便选一张）。
+    // 不能像非分牌那样直接用 cardPower 挑，会挑出分值更大的那张。
+    return cards.reduce((a, b) =>
+        (a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit)) < 0 ? a : b
     );
 }
 
