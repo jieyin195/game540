@@ -106,6 +106,11 @@ export class GameState {
         this.trumpCaller     = -1;    // 叫主玩家索引
         /** @type {Card[]} */
         this.trumpCallCards  = [];    // 叫主用的牌
+        // 本局第一个成功叫主的玩家索引（叫主阶段全程不变）。用于判断"反主牌必出"：
+        // 只有最终站住的叫主人不是这个人时才算真正的反主、才强制必出；
+        // 哪怕这个人中途被反、自己又反回去拿回叫主权，只要最后还是他，就仍算
+        // "叫主成功"，不强制必出。
+        this.originalCallerIdx = -1;
         /** @type {TrickEntry[]} */
         this.currentTrick    = [];    // 当前轮出牌记录
         /** @type {string} */
@@ -171,6 +176,7 @@ export class GameState {
         this.trumpCaller    = -1;
         this.trumpCallCards = [];
         this.mustPlayCards  = [];
+        this.originalCallerIdx = -1;
         this.callTrumpDone  = false;
         this.currentTrick   = [];
         this.trickCardCount = 0;
@@ -197,9 +203,12 @@ export class GameState {
 
         if (this.trumpCaller === -1) {
             if (canCallTrump(callCards)) {
-                this.trumpCaller    = playerIdx;
-                this.trumpCallCards = callCards;
-                this.mustPlayCards  = [...callCards];
+                this.trumpCaller       = playerIdx;
+                this.trumpCallCards    = callCards;
+                this.originalCallerIdx = playerIdx; // 记录本局第一个成功叫主的人
+                // 规则一"反主牌必出"只针对反主成功的情况；普通叫主（哪怕最终
+                // 没人反主成功、就此定局）不强制叫主人必须打出这几张，可以自由领出。
+                this.mustPlayCards  = [];
                 this.trumpSuit      = this._extractTrumpSuit(callCards);
                 this.message        = `${this.players[playerIdx].name} 叫主`;
                 return true;
@@ -209,7 +218,10 @@ export class GameState {
             if (canCounterTrump(callCards, this.trumpCallCards)) {
                 this.trumpCaller    = playerIdx;
                 this.trumpCallCards = callCards;
-                this.mustPlayCards  = [...callCards];
+                // 只有最终站住的叫主人不是"本局第一个叫主的人"时，才算真正的
+                // 反主、才强制必出；如果是最初叫主的人自己把叫主权反回来
+                // （哪怕中途被别人反过），仍然算"叫主成功"，不强制必出。
+                this.mustPlayCards  = (playerIdx === this.originalCallerIdx) ? [] : [...callCards];
                 this.trumpSuit      = this._extractTrumpSuit(callCards);
                 this.message        = `${this.players[playerIdx].name} 反主`;
                 return true;
