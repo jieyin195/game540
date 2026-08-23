@@ -881,6 +881,46 @@ function _partitionByPairKeyCounts(cards, requiredCards, trumpSuit) {
 }
 
 // ---------------------------------------------------------------------------
+// "见5须出A"：领出的是副牌5（单张/对子/三同张）时，跟牌人手里若有张数
+// 刚好匹配的同花色A，必须把这些A打出来。
+// ---------------------------------------------------------------------------
+
+/**
+ * 检查"见5须出A"规则。只在领出方真正领出的牌型就是副牌5（单张/对子/三同张，
+ * 不是主牌）时触发；跟牌人手里同花色A的张数必须跟领出的5的张数刚好一致
+ * （单5配单A、对5配对A、三同张5配三同张A）才算数，张数不够或更多都不触发。
+ * 不受"是否已经被炸"影响——被炸后 requiredCount 会大于 ledCards.length，
+ * 这条规则只关心原始领出的牌型，被炸后的结构交给炸弹规则处理，这里跳过。
+ * @param {Card[]} followCards
+ * @param {Card[]} ledCards
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @param {boolean} bombed
+ * @returns {[boolean, string]}
+ */
+function _checkMustPlayMatchingAce(followCards, ledCards, hand, trumpSuit, bombed) {
+    if (bombed) return [true, ''];
+
+    const ledType = getPlayType(ledCards, trumpSuit);
+    if (ledType !== PlayType.SINGLE && ledType !== PlayType.PAIR && ledType !== PlayType.TRIPLE) return [true, ''];
+
+    const ledCard = ledCards[0];
+    if (ledCard.rank !== '5' || isTrump(ledCard, trumpSuit)) return [true, '']; // 只管副牌5，不管主5
+
+    const suit = ledCard.suit;
+    const neededCount = ledCards.length; // 1/2/3
+    const acesInHand = hand.filter(c => c.suit === suit && c.rank === 'A');
+    if (acesInHand.length !== neededCount) return [true, '']; // 张数没有刚好对上，不触发
+
+    const acesPlayed = followCards.filter(c => c.suit === suit && c.rank === 'A').length;
+    if (acesPlayed < neededCount) {
+        const suitCn = _SUIT_CN[suit] ?? suit;
+        return [false, `见${suitCn}5须出${suitCn}A`];
+    }
+    return [true, ''];
+}
+
+// ---------------------------------------------------------------------------
 // Main validation entry point
 // ---------------------------------------------------------------------------
 
@@ -935,6 +975,10 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
             return [false, `必须跟${_SUIT_CN[ledSuit] ?? ledSuit}花色（手中还有${handInSuit.length}张）`];
         }
     }
+
+    // "见5须出A"：领出副牌5、手里有张数刚好匹配的同花色A时必须打出
+    const [aceOk, aceErr] = _checkMustPlayMatchingAce(followCards, ledCards, hand, trumpSuit, bombed);
+    if (!aceOk) return [false, aceErr];
 
     // Follow structure validation (跟牌牌型匹配：出对子→跟对子等)
     if (handInSuit.length > 0) {

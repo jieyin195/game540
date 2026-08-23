@@ -325,6 +325,15 @@ export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) 
 
     const playType = getPlayType(ledCards, trumpSuit);
 
+    // "见5须出A"：领出的是副牌5（单/对/三同张），手里同花色A张数刚好对上
+    // 领出的张数时，必须打出这些A——直接返回，不用再走后面的对子/单张决策。
+    if ((playType === PlayType.SINGLE || playType === PlayType.PAIR || playType === PlayType.TRIPLE) &&
+        ledCards[0].rank === '5' && !isTrump(ledCards[0], trumpSuit)) {
+        const suit = ledCards[0].suit;
+        const acesInHand = hand.filter(c => c.suit === suit && c.rank === 'A');
+        if (acesInHand.length === n) return acesInHand;
+    }
+
     // 如果是对子/连对，尝试出对应牌型
     if (playType === PlayType.PAIR || playType === PlayType.CONSEC_PAIRS) {
         return _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n);

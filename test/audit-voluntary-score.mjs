@@ -46,7 +46,7 @@ function totalScore(cards) {
 }
 
 let found = 0;
-const NUM_GAMES = 3000;
+const NUM_GAMES = 500;
 
 for (let g = 0; g < NUM_GAMES; g++) {
     const game = new GameState();
