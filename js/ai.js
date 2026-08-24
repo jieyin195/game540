@@ -481,12 +481,18 @@ function _followPairs(hand, ledCards, currentBest, trumpSuit, trickHasScore, n) 
         }
     }
 
-    // 对子不足，能出几对就出几对，剩余用单张补（优先补不含分值的牌，避免主动垫分）
+    // 对子不足，能出几对就出几对，剩余用单张补（优先补不含分值的牌，避免主动垫分）。
+    // 结构优先级不分花色：完全没有同花色牌时（handInSuit为空，此时 pairsInSuit
+    // 必然也是空的），改在整手牌范围内找一对来出，不能因为跟不上花色就放弃
+    // "有对子先出对子"这条、直接散牌垫。同花色还有牌但凑不成对时（比如只剩1张
+    // 单张），必须先用完这些同花色牌，不去别的花色找对子。
     const result = [];
     const usedCards = new Set();
-    for (const pair of pairsInSuit) {
-        result.push(...pair);
-        for (const c of pair) usedCards.add(c);
+    const substitutePairs = handInSuit.length === 0 ? getPairs(hand, trumpSuit) : pairsInSuit;
+    if (substitutePairs.length > 0) {
+        const bestPair = _smallestPreferNonScore(substitutePairs, trumpSuit);
+        result.push(...bestPair);
+        for (const c of bestPair) usedCards.add(c);
     }
     const remainingNeeded = n - result.length;
     const fillerPool = (handInSuit.length ? handInSuit : hand).filter(c => !usedCards.has(c));
@@ -546,20 +552,33 @@ function _followConsecutiveGroups(hand, ledCards, currentBest, trumpSuit, trickH
         );
     }
 
-    // 凑不出真正连续的窗口：能出几组同花色对子/3同张就出几组（优先用不含分值的组，
-    // 分牌组只在不含分的组不够时才补上），剩余用不含分值的散牌补
+    // 凑不出真正连续的窗口：能出几组对子/3同张就出几组，剩余用不含分值的
+    // 散牌补。这里不能用上面 windows 搜索时的 pool/groups——那个为了找"真正
+    // 连续的窗口"特意限定在主牌范围内，但规则一"也可出其他花色的牌垫牌"
+    // 说明失去连续性之后的兜底垫牌不该再局限于主牌，任意花色的对子/三同张
+    // 都是候选（优先不含分值的组，分牌组只在不含分的组不够时才补上）。
     const result = [];
     const usedCards = new Set();
-    const rawGroups = groupSize === 2 ? pairsInSuit : getTriples(handInSuit, trumpSuit);
+    const fallbackGroups = handInSuit.length > 0
+        ? groups
+        : (groupSize === 2 ? getPairs(hand, trumpSuit) : getTriples(hand, trumpSuit));
     const byGroupPower = (a, b) => cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit);
-    const nonScoreGroups = rawGroups.filter(g => g[0].scoreValue() === 0).sort(byGroupPower);
-    const scoreGroups    = rawGroups.filter(g => g[0].scoreValue() > 0).sort(byGroupPower);
+    // 分牌组之间也要按"分小牌小顺序"排（分值优先，cardPower 只用来在分值
+    // 相同时兜底），不能只按 cardPower 排——那对不同花色的副牌不代表真实
+    // 分值大小关系，会挑出分值更高的组（比如误选10分的K对而不是5分的5对）。
+    const byScoreThenPower = (a, b) => (a[0].scoreValue() - b[0].scoreValue()) || byGroupPower(a, b);
+    const nonScoreGroups = fallbackGroups.filter(g => g[0].scoreValue() === 0).sort(byGroupPower);
+    const scoreGroups    = fallbackGroups.filter(g => g[0].scoreValue() > 0).sort(byScoreThenPower);
     const groupsToUse = [...nonScoreGroups, ...scoreGroups];
     for (const g of groupsToUse.slice(0, windowCount)) {
         result.push(...g);
         for (const c of g) usedCards.add(c);
     }
-    const fillerPool = (handInSuit.length ? handInSuit : hand).filter(c => !usedCards.has(c));
+    // 补位散牌池子要跟 fallbackGroups 用同一个范围——同花色不够时已经放宽到
+    // 整手牌找结构了，补位单张也不能再退回主牌，否则会漏掉整手牌里其实有的
+    // 不算分副牌，误选一张算分的主牌垫上。
+    const fillerBasePool = handInSuit.length > 0 ? pool : hand;
+    const fillerPool = (fillerBasePool.length ? fillerBasePool : hand).filter(c => !usedCards.has(c));
     const fillers = _pickDiscard(fillerPool, n - result.length, trumpSuit);
     result.push(...fillers);
     for (const c of fillers) usedCards.add(c);
@@ -674,21 +693,24 @@ function _pickDiscard(hand, n, trumpSuit) {
  */
 function _smallestPreferNonScore(groups, trumpSuit) {
     const nonScore = groups.filter(g => g[0].scoreValue() === 0);
-    const candidates = nonScore.length ? nonScore : groups;
-    return candidates.reduce((a, b) =>
-        cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
+    if (nonScore.length) {
+        return nonScore.reduce((a, b) =>
+            cardPower(a[0], trumpSuit) < cardPower(b[0], trumpSuit) ? a : b);
+    }
+    // 全是分牌组时，必须按"分小牌小顺序"——先比分值（比如5分的对子 < 10分的
+    // 对子），分值相同时才用 cardPower 兜底。不能直接用 cardPower 挑，那个
+    // 数值对不同花色的副牌只是内部占位、不代表真实分值大小关系。
+    return groups.reduce((a, b) =>
+        (a[0].scoreValue() - b[0].scoreValue() || cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)) < 0 ? a : b
+    );
 }
 
 /**
- * 按"垫最接近相同的牌"原则选垫牌，入口函数：根据手里有没有同花色牌，
- * 决定要不要走结构化层级。
- *
- * docs/rules.md"垫牌原则"里 1~4 档（同花色3同张+单张/2对/1对+2单/4单）明确
- * 都是"同花色"专属的；完全没有同花色牌时是第5档"无同花色牌时，垫其他牌
- * （除不能主动垫分外可随便垫）"——不讲结构，纯按分值从小到大垫。
- * 所以 handInSuit 为空时不能把 _pickStructuredDiscard 套到整手牌上硬凑结构
- * （那样可能被迫多垫分值更高的牌，比如为了凑够"2对"把本可省下的分牌对子
- * 也搭进去），得直接退化成无结构的 _pickDiscard。
+ * 按"垫最接近相同的牌"原则选垫牌，入口函数：优先在同花色范围内找结构，
+ * 没有同花色牌时改在整手牌范围内找结构——结构优先级（对子/三同张）不分
+ * 花色，手里有对子就该按对子出，不能为了省分主动拆散结构；"不能主动垫
+ * 分牌"只用来在同一档位有多个候选时挑哪一组（优先不含分值的），或者压根
+ * 凑不出任何结构、纯散牌垫牌时才生效。
  * @param {Card[]} handInSuit - 手牌里跟领出同花色的部分（可能为空数组）
  * @param {Card[]} hand - 全部手牌
  * @param {number} n - 需要的总张数
@@ -696,8 +718,7 @@ function _smallestPreferNonScore(groups, trumpSuit) {
  * @returns {Card[]}
  */
 function _pickDiscardBySuitTier(handInSuit, hand, n, trumpSuit) {
-    if (handInSuit.length === 0) return _pickDiscard(hand, n, trumpSuit);
-    return _pickStructuredDiscard(handInSuit, hand, n, trumpSuit);
+    return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, n, trumpSuit);
 }
 
 /**
@@ -735,9 +756,10 @@ function _pickStructuredDiscard(pool, fullHand, n, trumpSuit) {
         const pairs = getPairs(pool, trumpSuit);
         if (pairs.length >= 2) {
             const byPower  = (a, b) => cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit);
+            const byScoreThenPower = (a, b) => (a[0].scoreValue() - b[0].scoreValue()) || byPower(a, b);
             const nonScore = pairs.filter(p => p[0].scoreValue() === 0).sort(byPower);
-            const scored   = pairs.filter(p => p[0].scoreValue() > 0).sort(byPower);
-            const ordered  = [...nonScore, ...scored]; // 优先用不含分值的对子凑够2对，不够再补分牌对子
+            const scored   = pairs.filter(p => p[0].scoreValue() > 0).sort(byScoreThenPower);
+            const ordered  = [...nonScore, ...scored]; // 优先用不含分值的对子凑够2对，不够再补分牌对子（按分小牌小顺序）
             _add(ordered[0]);
             _add(ordered[1]);
         }

@@ -981,12 +981,15 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     if (!aceOk) return [false, aceErr];
 
     // Follow structure validation (跟牌牌型匹配：出对子→跟对子等)
-    if (handInSuit.length > 0) {
-        const fInSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
-        if (fInSuit.length > 0) {
-            const [structOk, structErr] = _validateFollowStructure(fInSuit, handInSuit, effectiveLedType, trumpSuit);
-            if (!structOk) return [false, structErr];
-        }
+    // 结构优先级不分花色：完全没有同花色牌时，改用整手牌判断"有没有对子/
+    // 三同张"，不能因为跟不上领出的花色就豁免"有对子必须出对子"这条。
+    const structuralPool = handInSuit.length > 0 ? handInSuit : hand;
+    const followStructural = handInSuit.length > 0
+        ? followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit)
+        : followCards;
+    if (followStructural.length > 0) {
+        const [structOk, structErr] = _validateFollowStructure(followStructural, structuralPool, effectiveLedType, trumpSuit);
+        if (!structOk) return [false, structErr];
     }
 
     // 能压必压 rule (must beat if possible, when trick has score)
@@ -1000,24 +1003,25 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     }
 
     // Rule: no voluntary score discard (不能主动垫分牌)
-    // 分别检查同花色和异花色部分；压牌（真的赢下这一墩）豁免"主动垫分"检查
+    // 压牌（真的赢下这一墩）豁免"主动垫分"检查。结构优先级不分花色：完全
+    // 没有同花色牌时，"有没有对子/三同张可以用"改用整手牌判断（呼应上面的
+    // structuralPool），不能因为跟不上花色就把结构判断退化成纯散牌垫分逻辑
+    // ——那样会漏判"手里明明有对子却拆开省分"的情况。
     const isBeatingPlay = (currentBest && currentBest.length > 0)
         ? doesBeat(followCards, currentBest, trumpSuit)
         : false;
-    const followInSuit  = followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit);
-    const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
 
-    if (followInSuit.length > 0 && handInSuit.length > 0) {
+    if (followStructural.length > 0) {
         if (!isBeatingPlay &&
             (effectiveLedType === PlayType.CONSEC_PAIRS || effectiveLedType === PlayType.CONSEC_TRIPLES)) {
             // 连对/连三同张：可选方案是完整的连续窗口，不是任意同花色对子/三同张
             // 的自由拼凑，用专门的窗口级比较，见 _checkConsecutiveNoVoluntaryScore 注释。
-            const [consecOk, consecErr] = _checkConsecutiveNoVoluntaryScore(followInSuit, handInSuit, effectiveLedType, trumpSuit);
+            const [consecOk, consecErr] = _checkConsecutiveNoVoluntaryScore(followStructural, structuralPool, effectiveLedType, trumpSuit);
             if (!consecOk) return [false, consecErr];
         } else {
-            const groupCards = _forcedGroupCards(handInSuit, effectiveLedType, followInSuit.length, trumpSuit);
-            const [followGroup, followFiller] = _partitionByPairKeyCounts(followInSuit, groupCards, trumpSuit);
-            const [, handFiller] = _partitionByPairKeyCounts(handInSuit, groupCards, trumpSuit);
+            const groupCards = _forcedGroupCards(structuralPool, effectiveLedType, followStructural.length, trumpSuit);
+            const [followGroup, followFiller] = _partitionByPairKeyCounts(followStructural, groupCards, trumpSuit);
+            const [, handFiller] = _partitionByPairKeyCounts(structuralPool, groupCards, trumpSuit);
 
             const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
             if (!groupOk) return [false, groupErr];
@@ -1026,11 +1030,18 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
             if (!fillerOk) return [false, fillerErr];
         }
     }
-    if (followOffSuit.length > 0) {
-        const handOffSuit = hand.filter(c => !handInSuit.includes(c));
-        if (handOffSuit.length > 0) {
-            const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit, isBeatingPlay);
-            if (!ok) return [false, err];
+
+    // 有同花色牌、但这次跟牌里还带了同花色以外的牌（混合填充）时，那部分
+    // 异花色散牌单独按"不能主动垫分"检查——完全没有同花色牌的情况已经
+    // 归并进上面的 structuralPool 分支，这里不会重复处理。
+    if (handInSuit.length > 0) {
+        const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
+        if (followOffSuit.length > 0) {
+            const handOffSuit = hand.filter(c => !handInSuit.includes(c));
+            if (handOffSuit.length > 0) {
+                const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit, isBeatingPlay);
+                if (!ok) return [false, err];
+            }
         }
     }
 
@@ -1100,21 +1111,32 @@ function _pickPadGroup(groups) {
     return nonScore.length > 0 ? nonScore[0] : groups[0];
 }
 
-function _pickPadFromPool(pool, n, trumpSuit) {
+/**
+ * @param {Card[]} pool
+ * @param {number} n
+ * @param {string|null} trumpSuit
+ * @param {boolean} [allowStructure=true] - 是否允许按对子/三同张结构挑选。
+ * 只有"同花色/主牌"这个池子（getPadCards 的 preferred）才允许——规则四的
+ * 结构化垫牌优先级明确是"同花色"专属的；同花色/主牌不够、退到其他花色的
+ * 池子时，不该再硬凑结构（可能被迫多垫本可省下的分牌），直接按分值最小垫。
+ */
+function _pickPadFromPool(pool, n, trumpSuit, allowStructure = true) {
     if (!pool.length || n <= 0) return [];
-    if (n >= 3) {
-        const triples = getTriples(pool, trumpSuit);
-        if (triples.length > 0) return _pickPadGroup(triples).slice(0, 3);
-    }
-    if (n >= 2) {
-        const pairs = getPairs(pool, trumpSuit);
-        if (pairs.length > 0) {
-            const pair = [..._pickPadGroup(pairs)];
-            if (n === 2) return pair;
-            const remaining = [...pool.filter(c => !pair.includes(c))]
-                .sort((a, b) => a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
-            if (remaining.length > 0) return [...pair, remaining[0]];
-            return pair;
+    if (allowStructure) {
+        if (n >= 3) {
+            const triples = getTriples(pool, trumpSuit);
+            if (triples.length > 0) return _pickPadGroup(triples).slice(0, 3);
+        }
+        if (n >= 2) {
+            const pairs = getPairs(pool, trumpSuit);
+            if (pairs.length > 0) {
+                const pair = [..._pickPadGroup(pairs)];
+                if (n === 2) return pair;
+                const remaining = [...pool.filter(c => !pair.includes(c))]
+                    .sort((a, b) => a.scoreValue() - b.scoreValue() || cardPower(a, trumpSuit) - cardPower(b, trumpSuit));
+                if (remaining.length > 0) return [...pair, remaining[0]];
+                return pair;
+            }
         }
     }
     const sorted = [...pool].sort((a, b) =>
