@@ -58,6 +58,34 @@ const SUIT_DISPLAY_NAME = {
     null:            '常主',
 };
 
+// 日志文字里牌名的配色（背景是深绿色桌面，纯黑看不清，黑桃/梅花改用浅色）
+const MSG_SUIT_COLOR = {
+    [SUIT_SPADES]:   '#f0f0f0',
+    [SUIT_CLUBS]:    '#f0f0f0',
+    [SUIT_HEARTS]:   '#ff6b6b',
+    [SUIT_DIAMONDS]: '#ff6b6b',
+};
+const MSG_SPECIAL_COLOR = '#ffcf4d'; // 大王/小王/字牌
+const MSG_SPECIAL_NAMES = new Set(['大王', '小王', '字牌']);
+
+/**
+ * 根据token首字符判断这张牌属于哪个花色，返回对应的日志文字颜色；
+ * 不是牌名（普通文字）时返回 null。
+ * @param {string} token
+ * @returns {string|null}
+ */
+function _msgTokenColor(token) {
+    if (MSG_SPECIAL_NAMES.has(token)) return MSG_SPECIAL_COLOR;
+    const first = token[0];
+    if (first === SUIT_SYMBOL[SUIT_SPADES] || first === SUIT_SYMBOL[SUIT_CLUBS]) {
+        return first === SUIT_SYMBOL[SUIT_SPADES] ? MSG_SUIT_COLOR[SUIT_SPADES] : MSG_SUIT_COLOR[SUIT_CLUBS];
+    }
+    if (first === SUIT_SYMBOL[SUIT_HEARTS] || first === SUIT_SYMBOL[SUIT_DIAMONDS]) {
+        return first === SUIT_SYMBOL[SUIT_HEARTS] ? MSG_SUIT_COLOR[SUIT_HEARTS] : MSG_SUIT_COLOR[SUIT_DIAMONDS];
+    }
+    return null;
+}
+
 const FONT_STACK = '"Noto Sans SC", "Microsoft YaHei", "SimHei", sans-serif';
 
 // ---------------------------------------------------------------------------
@@ -639,8 +667,32 @@ export class GameRenderer {
         let y = area.y + area.h - 30 - msgs.length * 17;
         this._fillText('日志', x, y - 18, { size: 13, color: C_GOLD, bold: true });
         for (const msg of msgs) {
-            this._fillText(msg, x, y, { size: 13, color: C_WHITE });
+            this._fillColoredMessage(msg, x, y, 13);
             y += 17;
+        }
+    }
+
+    /**
+     * 按空格分词绘制一行日志：牌名（比如 ♦K、大王）按花色/特殊牌上色，
+     * 其余普通文字保持默认白色。
+     * @param {string} msg
+     * @param {number} x
+     * @param {number} y
+     * @param {number} size
+     */
+    _fillColoredMessage(msg, x, y, size) {
+        const ctx = this.ctx;
+        ctx.font = `${size}px ${FONT_STACK}`;
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'start';
+
+        const tokens = msg.split(' ');
+        let cx = x;
+        for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i] + (i < tokens.length - 1 ? ' ' : '');
+            ctx.fillStyle = _msgTokenColor(tokens[i]) ?? C_WHITE;
+            ctx.fillText(token, cx, y);
+            cx += ctx.measureText(token).width;
         }
     }
 
@@ -766,7 +818,9 @@ export class GameRenderer {
 
         for (const suit of suitList) {
             const isTs = suit === trump;
-            const symCol = isTs ? '#ffd200' : (SUIT_COLOR_MAP[suit] || C_BLACK);
+            // 记牌器面板背景是深色（#142846），黑桃/梅花用 SUIT_COLOR_MAP 的纯黑
+            // 会看不清（那个配色是给浅色卡面用的），改用日志同款的深色背景配色
+            const symCol = isTs ? '#ffd200' : (MSG_SUIT_COLOR[suit] || C_WHITE);
             const suitCn = suitCnMap[suit] + (isTs ? ' ★' : '');
 
             this._fillText(`${SUIT_SYMBOL[suit]} ${suitCn}`, colXs[0], rowY, {
