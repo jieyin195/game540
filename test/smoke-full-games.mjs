@@ -100,7 +100,7 @@ function runPlayPhase(game, stats) {
         } else {
             const currentBest   = game.getCurrentBest() ?? [];
             const trickHasScore = game.trickHasScore();
-            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
+            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore, game.trickCardCount);
         }
 
         const needed = ledCards ? game.trickCardCount : (cards ? cards.length : 1);

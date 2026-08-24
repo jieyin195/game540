@@ -54,7 +54,7 @@ for (let g = 0; g < NUM_GAMES && !found; g++) {
         } else {
             const currentBest   = game.getCurrentBest() ?? [];
             const trickHasScore = game.trickHasScore();
-            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
+            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore, game.trickCardCount);
         }
 
         const needed = ledCards ? game.trickCardCount : (cards ? cards.length : 1);

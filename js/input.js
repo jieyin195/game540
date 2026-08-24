@@ -594,7 +594,7 @@ function _updatePlay(renderer, game) {
             // Following
             const currentBest  = game.getCurrentBest() ?? [];
             const trickHasScore = game.trickHasScore();
-            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore);
+            cards = aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore, game.trickCardCount);
         }
 
         // Ensure the AI plays the correct number of cards (use trickCardCount for bombed tricks)

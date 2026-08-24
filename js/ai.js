@@ -313,15 +313,36 @@ function _findBestConsecutivePairs(hand, trumpSuit) {
  * @param {Card[]} currentBest
  * @param {string|null} trumpSuit
  * @param {boolean} trickHasScore
+ * @param {number} [requiredCount] - 本轮实际需要出的张数；被炸后会大于 ledCards.length，
+ * 不传时默认按 ledCards.length（未被炸的正常情况）
  * @returns {Card[]}
  */
-export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) {
+export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore, requiredCount) {
     const n = ledCards.length;
+    const actualNeeded = requiredCount ?? n;
+    const bombed = actualNeeded > n;
     const ledSuit = getFollowSuit(ledCards, trumpSuit);
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
 
     // 可用牌：优先用本花色牌（计算用，实际分支内处理）
     const available = handInSuit.length ? handInSuit : hand;
+
+    // 被炸后：不管原来领出的是什么牌型，统一按跟炸弹的结构处理（且张数是
+    // actualNeeded 而不是原来的 n），跟 validateFollow 的 bombed 分支保持一致。
+    // "见5须出A"这条规则被炸后不适用（rules.js 的 _checkMustPlayMatchingAce
+    // 同样在 bombed 时直接放行），所以这里要放在见5检查之前处理并直接返回。
+    if (bombed) {
+        const candidateBombs = getBombs(hand, trumpSuit);
+        if (candidateBombs.length) {
+            const sortedBombs = [...candidateBombs].sort((a, b) =>
+                cardPower(a[0], trumpSuit) - cardPower(b[0], trumpSuit)
+            );
+            for (const bomb of sortedBombs) {
+                if (doesBeat(bomb, currentBest, trumpSuit)) return bomb;
+            }
+        }
+        return _pickDiscardBySuitTier(handInSuit, hand, actualNeeded, trumpSuit);
+    }
 
     const playType = getPlayType(ledCards, trumpSuit);
 
@@ -356,7 +377,7 @@ export function aiFollow(hand, ledCards, currentBest, trumpSuit, trickHasScore) 
                 if (doesBeat(bomb, currentBest, trumpSuit)) return bomb;
             }
         }
-        return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, 4, trumpSuit);
+        return _pickDiscardBySuitTier(handInSuit, hand, 4, trumpSuit);
     }
 
     // 单张
@@ -579,7 +600,7 @@ function _followNSame(hand, ledCards, currentBest, trumpSuit, trickHasScore, n, 
     }
 
     // 无3同张：用对子+单张或3单张
-    return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, n, trumpSuit);
+    return _pickDiscardBySuitTier(handInSuit, hand, n, trumpSuit);
 }
 
 /**
@@ -659,10 +680,32 @@ function _smallestPreferNonScore(groups, trumpSuit) {
 }
 
 /**
+ * 按"垫最接近相同的牌"原则选垫牌，入口函数：根据手里有没有同花色牌，
+ * 决定要不要走结构化层级。
+ *
+ * docs/rules.md"垫牌原则"里 1~4 档（同花色3同张+单张/2对/1对+2单/4单）明确
+ * 都是"同花色"专属的；完全没有同花色牌时是第5档"无同花色牌时，垫其他牌
+ * （除不能主动垫分外可随便垫）"——不讲结构，纯按分值从小到大垫。
+ * 所以 handInSuit 为空时不能把 _pickStructuredDiscard 套到整手牌上硬凑结构
+ * （那样可能被迫多垫分值更高的牌，比如为了凑够"2对"把本可省下的分牌对子
+ * 也搭进去），得直接退化成无结构的 _pickDiscard。
+ * @param {Card[]} handInSuit - 手牌里跟领出同花色的部分（可能为空数组）
+ * @param {Card[]} hand - 全部手牌
+ * @param {number} n - 需要的总张数
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+function _pickDiscardBySuitTier(handInSuit, hand, n, trumpSuit) {
+    if (handInSuit.length === 0) return _pickDiscard(hand, n, trumpSuit);
+    return _pickStructuredDiscard(handInSuit, hand, n, trumpSuit);
+}
+
+/**
  * 按"垫最接近相同的牌"原则选垫牌。
  * 层级：炸弹 > 3同张+1 > 2对 > 1对+2单 > 全单张。
  * 同一档位内优先选不含分值的组合，避免为了凑结构主动垫出分牌。
- * @param {Card[]} pool - 优先取牌池（同花色牌）
+ * @param {Card[]} pool - 优先取牌池（同花色牌，调用方须保证非空——空池请用
+ * _pickDiscardBySuitTier，它会正确退化成无结构的 _pickDiscard）
  * @param {Card[]} fullHand - 全部手牌（pool不足时补充）
  * @param {number} n - 需要的总张数
  * @param {string|null} trumpSuit
@@ -731,5 +774,5 @@ function _pickStructuredDiscard(pool, fullHand, n, trumpSuit) {
 export function safeFollowFallback(hand, ledCards, trumpSuit, requiredCount) {
     const ledSuit    = getFollowSuit(ledCards, trumpSuit);
     const handInSuit = filterHandBySuit(hand, ledSuit, trumpSuit);
-    return _pickStructuredDiscard(handInSuit.length ? handInSuit : hand, hand, requiredCount, trumpSuit);
+    return _pickDiscardBySuitTier(handInSuit, hand, requiredCount, trumpSuit);
 }
