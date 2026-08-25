@@ -980,15 +980,16 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     const [aceOk, aceErr] = _checkMustPlayMatchingAce(followCards, ledCards, hand, trumpSuit, bombed);
     if (!aceOk) return [false, aceErr];
 
-    // Follow structure validation (跟牌牌型匹配：出对子→跟对子等)
-    // 结构优先级不分花色：完全没有同花色牌时，改用整手牌判断"有没有对子/
-    // 三同张"，不能因为跟不上领出的花色就豁免"有对子必须出对子"这条。
-    const structuralPool = handInSuit.length > 0 ? handInSuit : hand;
-    const followStructural = handInSuit.length > 0
-        ? followCards.filter(c => getSuitOfCard(c, trumpSuit) === ledSuit)
-        : followCards;
-    if (followStructural.length > 0) {
-        const [structOk, structErr] = _validateFollowStructure(followStructural, structuralPool, effectiveLedType, trumpSuit);
+    // 结构优先级（对子/三同张）只在"同花色"范围内强制要求，不分花色不成立：
+    // - 同花色牌够用（handInSuit.length >= n）：这次跟的牌应该全部来自同花色
+    //   （前面"必须跟花色"已经保证），结构/不能主动垫分检查都在同花色范围内做。
+    // - 同花色牌不够用：同花色的牌必须全部原样用上（没有选择余地，不受结构/
+    //   分值检查约束），跟牌里剩下的部分（同花色以外）不要求凑结构，只按
+    //   "不能主动垫分牌"做纯散牌层面的分值检查。
+    const enoughInSuit = handInSuit.length >= n;
+
+    if (enoughInSuit) {
+        const [structOk, structErr] = _validateFollowStructure(followCards, handInSuit, effectiveLedType, trumpSuit);
         if (!structOk) return [false, structErr];
     }
 
@@ -1003,25 +1004,22 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
     }
 
     // Rule: no voluntary score discard (不能主动垫分牌)
-    // 压牌（真的赢下这一墩）豁免"主动垫分"检查。结构优先级不分花色：完全
-    // 没有同花色牌时，"有没有对子/三同张可以用"改用整手牌判断（呼应上面的
-    // structuralPool），不能因为跟不上花色就把结构判断退化成纯散牌垫分逻辑
-    // ——那样会漏判"手里明明有对子却拆开省分"的情况。
+    // 压牌（真的赢下这一墩）豁免"主动垫分"检查。
     const isBeatingPlay = (currentBest && currentBest.length > 0)
         ? doesBeat(followCards, currentBest, trumpSuit)
         : false;
 
-    if (followStructural.length > 0) {
+    if (enoughInSuit) {
         if (!isBeatingPlay &&
             (effectiveLedType === PlayType.CONSEC_PAIRS || effectiveLedType === PlayType.CONSEC_TRIPLES)) {
             // 连对/连三同张：可选方案是完整的连续窗口，不是任意同花色对子/三同张
             // 的自由拼凑，用专门的窗口级比较，见 _checkConsecutiveNoVoluntaryScore 注释。
-            const [consecOk, consecErr] = _checkConsecutiveNoVoluntaryScore(followStructural, structuralPool, effectiveLedType, trumpSuit);
+            const [consecOk, consecErr] = _checkConsecutiveNoVoluntaryScore(followCards, handInSuit, effectiveLedType, trumpSuit);
             if (!consecOk) return [false, consecErr];
         } else {
-            const groupCards = _forcedGroupCards(structuralPool, effectiveLedType, followStructural.length, trumpSuit);
-            const [followGroup, followFiller] = _partitionByPairKeyCounts(followStructural, groupCards, trumpSuit);
-            const [, handFiller] = _partitionByPairKeyCounts(structuralPool, groupCards, trumpSuit);
+            const groupCards = _forcedGroupCards(handInSuit, effectiveLedType, followCards.length, trumpSuit);
+            const [followGroup, followFiller] = _partitionByPairKeyCounts(followCards, groupCards, trumpSuit);
+            const [, handFiller] = _partitionByPairKeyCounts(handInSuit, groupCards, trumpSuit);
 
             const [groupOk, groupErr] = _checkNoVoluntaryScore(followGroup, groupCards, trumpSuit, isBeatingPlay);
             if (!groupOk) return [false, groupErr];
@@ -1029,20 +1027,14 @@ export function validateFollow(followCards, ledCards, hand, trumpSuit, trickHasS
             const [fillerOk, fillerErr] = _checkNoVoluntaryScore(followFiller, handFiller, trumpSuit, isBeatingPlay);
             if (!fillerOk) return [false, fillerErr];
         }
-    }
-
-    // 有同花色牌、但这次跟牌里还带了同花色以外的牌（混合填充）时，那部分
-    // 异花色散牌单独按"不能主动垫分"检查——完全没有同花色牌的情况已经
-    // 归并进上面的 structuralPool 分支，这里不会重复处理。
-    if (handInSuit.length > 0) {
+    } else {
+        // 同花色不够：mandatory 部分（followCards 里属于 handInSuit 花色的牌，
+        // 前面"必须跟花色"已保证全部用上）不再重复检查；缺口部分（其他花色）
+        // 只做纯散牌"不能主动垫分"检查，不要求凑结构。
         const followOffSuit = followCards.filter(c => getSuitOfCard(c, trumpSuit) !== ledSuit);
-        if (followOffSuit.length > 0) {
-            const handOffSuit = hand.filter(c => !handInSuit.includes(c));
-            if (handOffSuit.length > 0) {
-                const [ok, err] = _checkNoVoluntaryScore(followOffSuit, handOffSuit, trumpSuit, isBeatingPlay);
-                if (!ok) return [false, err];
-            }
-        }
+        const offSuitPool = hand.filter(c => !handInSuit.includes(c));
+        const [offSuitOk, offSuitErr] = _checkNoVoluntaryScore(followOffSuit, offSuitPool, trumpSuit, isBeatingPlay);
+        if (!offSuitOk) return [false, offSuitErr];
     }
 
     return [true, ''];
@@ -1095,7 +1087,7 @@ export function getPadCards(hand, originalPlay, trumpSuit) {
 
     let pad = _pickPadFromPool(preferred, nPad, trumpSuit);
     if (pad.length < nPad) {
-        pad = pad.concat(_pickPadFromPool(other, nPad - pad.length, trumpSuit));
+        pad = pad.concat(_pickPadFromPool(other, nPad - pad.length, trumpSuit, false));
     }
     return pad.slice(0, nPad);
 }

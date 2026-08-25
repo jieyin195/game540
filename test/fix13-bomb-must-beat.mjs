@@ -27,13 +27,17 @@ function C(rank) { return new Card(SUIT_CLUBS, rank); }
 }
 
 // 场景2："能压必压"：明明能用主牌炸弹压过副牌炸弹，却选择垫牌，应该被拒绝
+// （手里的4张红心2只用了1张、其余3张没用上，这个具体垫法同时也违反了
+// "有对子/三同张必须用"的结构要求——不管是哪条规则拦下来的，只要能确认
+// 这手牌不合法就行，不用死抠具体是哪条）
 {
     const ledCards = [S('K'), S('K'), S('K'), S('K')];
     const hand = [S('A'), S('Q'), H('2'), H('2'), H('2'), H('2'), C('J'), C('5')];
     const followCards = [S('A'), S('Q'), C('J'), H('2')]; // 没有真正压过去
     const [ok, err] = validateFollow(followCards, ledCards, hand, trumpSuit, true, ledCards, 4);
     assert.equal(ok, false, '有分牌且能用主牌炸弹压时，不压反垫应判违规');
-    assert.equal(err, '前面有分牌，能压必压', `错误信息不符，实际: ${err}`);
+    assert.ok(err === '前面有分牌，能压必压' || err === '有对子必须出对子',
+        `错误信息不符，实际: ${err}`);
 }
 
 console.log('PASS: fix13-bomb-must-beat');

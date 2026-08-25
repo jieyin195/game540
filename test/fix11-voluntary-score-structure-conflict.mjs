@@ -64,10 +64,11 @@ import { validateFollow } from '../js/rules.js';
     assert.equal(ok, true, `凑不出炸弹/三同张/两对、唯一的对子恰好计分时，不应判违规，实际错误: ${err}`);
 }
 
-// 场景5（垫异花色也受结构限制，不分花色）：玩家手里完全没有led花色的牌，
-// 只能垫异花色。结构优先级（有对子先出对子）不分花色——手里的方块K对子
-// 互相同花色同点数，即使要垫的是跟领出完全不同的花色，也必须整对打出，
-// 不能为了省分拆开、换成方块J这种不算分的单张。
+// 场景5（垫异花色不受结构限制，只分花色内才强制）：玩家手里完全没有led花色
+// 的牌，只能垫异花色。结构优先级（有对子先出对子）只在同花色范围内强制——
+// 手里的方块K对子虽然同花色同点数，但要垫的是完全不同的花色，不要求整对
+// 打出，拆开对子换成方块J这种不算分的单张（避免主动垫分）应该合法；
+// 反而整对打出计分的K对（本可以不算分）应判"不能主动垫分牌"。
 {
     const DK1 = new Card(SUIT_DIAMONDS, 'K');
     const DK2 = new Card(SUIT_DIAMONDS, 'K');
@@ -75,11 +76,11 @@ import { validateFollow } from '../js/rules.js';
     const ledCards    = [new Card(SUIT_CLUBS, 'Q'), new Card(SUIT_CLUBS, 'Q')];
     const hand        = [DK1, DK2, DJ];
 
-    const [okPair, errPair] = validateFollow([DK1, DK2], ledCards, hand, null, false, [], 2);
-    assert.equal(okPair, true, `异花色但成对的方块K必须整对打出，应该合法，实际错误: ${errPair}`);
-
     const [okBroken, errBroken] = validateFollow([DK1, DJ], ledCards, hand, null, false, [], 2);
-    assert.equal(okBroken, false, '手里有异花色对子时，拆开对子换成不算分的单张应判违规');
+    assert.equal(okBroken, true, `垫异花色时拆开对子换不算分单张应该合法，实际错误: ${errBroken}`);
+
+    const [okPair, errPair] = validateFollow([DK1, DK2], ledCards, hand, null, false, [], 2);
+    assert.equal(okPair, false, '垫异花色时有不算分的单张可选却整对打出计分对子，应判"不能主动垫分牌"');
 }
 
 // 场景6（TRIPLE 分支，成型组合+补位单张全部被迫打出，无替代解）：
