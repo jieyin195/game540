@@ -418,27 +418,23 @@ export class GameState {
             }
 
             // First-play rule: if any other player hasn't LED a trick yet (not merely
-            // "hasn't played a card" — following doesn't count), must lead a pair
-            // (or the biggest single if no pairs exist). This stays in force across
-            // multiple tricks until every player has had at least one turn to lead.
+            // "hasn't played a card" — following doesn't count), the leader may freely
+            // choose between a pair-based play (对子/三同张/连对等) or their single
+            // biggest card — not "pair mandatory whenever one exists". This stays in
+            // force across multiple tricks until every player has had a turn to lead.
             const anyUnplayed = this.players.some(
                 (p, i) => i !== playerIdx && !p.hasPlayed
             );
             if (anyUnplayed && !skipValidation) {
-                const pairs = getPairs(player.hand, this.trumpSuit);
-                if (pairs.length > 0) {
-                    // Must play a pair-based type
-                    const pairTypes = [
-                        PlayType.PAIR, PlayType.CONSEC_PAIRS,
-                        PlayType.TRIPLE, PlayType.CONSEC_TRIPLES,
-                        PlayType.BOMB,
-                    ];
-                    if (!pairTypes.includes(playType)) {
-                        return [false, '有玩家未当过领出者，必须出对子（或连对等）'];
+                const pairTypes = [
+                    PlayType.PAIR, PlayType.CONSEC_PAIRS,
+                    PlayType.TRIPLE, PlayType.CONSEC_TRIPLES,
+                    PlayType.BOMB,
+                ];
+                if (!pairTypes.includes(playType)) {
+                    if (playType !== PlayType.SINGLE) {
+                        return [false, '有玩家未当过领出者，必须出对子（或连对等）或最大的单张'];
                     }
-                } else {
-                    // No pairs — must play the biggest single
-                    if (playType !== PlayType.SINGLE) return [false, '无对子时必须出单张'];
                     const best = player.hand.reduce((b, c) =>
                         cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
                     );

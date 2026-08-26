@@ -179,7 +179,7 @@ function _callPower(cards) {
  * AI领出牌决策。
  * @param {Card[]} hand
  * @param {string|null} trumpSuit
- * @param {boolean} anyUnplayed - 是否有玩家未出过牌（影响必须出对子规则）
+ * @param {boolean} anyUnplayed - 是否有玩家未当过领出者（影响"对子/最大单张任选"规则）
  * @returns {Card[]}
  */
 export function aiLead(hand, trumpSuit, anyUnplayed, mustPlayCards = null) {
@@ -189,7 +189,9 @@ export function aiLead(hand, trumpSuit, anyUnplayed, mustPlayCards = null) {
     }
 
     if (anyUnplayed) {
-        // 有玩家未出过牌：必须出对子（或无对子时最大单张）
+        // 有玩家未当过领出者：对子（或三同张/连对等）和最大单张任选一种，
+        // 不是"有对子就必须出对子"——AI 策略上仍然优先选对子（能带走更多分/
+        // 消耗牌型），没有对子时才退而出最大单张，但这只是策略偏好，不是规则要求。
         const pairs = getPairs(hand, trumpSuit);
         if (pairs.length) {
             // 优先出非主牌的分值对子，次选主牌对子
