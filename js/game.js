@@ -42,7 +42,7 @@ export class Player {
         /** @type {Card[]} */
         this.hand       = [];
         this.trickScore = 0;    // 本局得分
-        this.hasPlayed  = false; // 本局是否出过牌
+        this.hasPlayed  = false; // 本局是否当过领出者（不是"跟过牌"，规则三看的是"谁还没领出过"）
     }
 
     /**
@@ -281,11 +281,11 @@ export class GameState {
 
     /**
      * 规则三扩展："领出者无对子、被迫出的最大单张打不过别人手里的牌"时，
-     * 由领出者之后第一个本局还没出过牌的玩家，从领出者手里随机抽一张牌代为打出
+     * 由领出者之后第一个本局还没当过领出者的玩家，从领出者手里随机抽一张牌代为打出
      * （只出这一张单张），防止领出者自行挑选具体是哪张牌。
      *
      * 判定顺序（先做便宜的检查，短路掉多数不适用的情况）：
-     * 1. 本局是否还有其他玩家一次牌都没出过——没有的话直接跳过，规则三本身也已经解除
+     * 1. 本局是否还有其他玩家一次领出者都没当过——没有的话直接跳过，规则三本身也已经解除
      * 2. 反主牌必出还没执行完——那个规则优先级更高，领出者必须先打反主的牌，不适用本规则
      * 3. 领出者手里有没有对子（含3同张/连对等）——有对子就轮不到"最大单张"这一分支
      * 4. 领出者手里最大的单张，是否真的打不过另外两人手里现有的牌
@@ -417,8 +417,10 @@ export class GameState {
                 this.mustPlayCards = [];
             }
 
-            // First-play rule: if any other player hasn't played yet, must lead a pair
-            // (or the biggest single if no pairs exist)
+            // First-play rule: if any other player hasn't LED a trick yet (not merely
+            // "hasn't played a card" — following doesn't count), must lead a pair
+            // (or the biggest single if no pairs exist). This stays in force across
+            // multiple tricks until every player has had at least one turn to lead.
             const anyUnplayed = this.players.some(
                 (p, i) => i !== playerIdx && !p.hasPlayed
             );
@@ -432,7 +434,7 @@ export class GameState {
                         PlayType.BOMB,
                     ];
                     if (!pairTypes.includes(playType)) {
-                        return [false, '有玩家未出过牌，必须出对子（或连对等）'];
+                        return [false, '有玩家未当过领出者，必须出对子（或连对等）'];
                     }
                 } else {
                     // No pairs — must play the biggest single
@@ -473,7 +475,8 @@ export class GameState {
 
             this.currentTrick.push(new TrickEntry(playerIdx, cards));
             player.removeCards(cards);
-            player.hasPlayed = true;
+            // 注意：跟牌不算"当过领出者"，hasPlayed 在这里不置 true——
+            // 规则三"还有玩家没出过牌"看的是有没有当过领出者，不是有没有跟过牌。
             return [true, ''];
         }
     }

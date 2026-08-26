@@ -464,6 +464,10 @@ export function canBeatSingle(card, currentBest, trumpSuit, cardOrder = 0, bestO
     const bestIsTrump = isTrump(currentBest, trumpSuit);
     if (cardIsTrump && !bestIsTrump) return true;
     if (!cardIsTrump && bestIsTrump) return false;
+    // 都不是主牌：不同花色不可比，先出者（currentBest）仍然大——不能只用
+    // cardPower 比（那只是内部任意排序，不代表真实大小关系），否则会把
+    // "跟不上花色、垫的牌"误判成"压过了"。
+    if (!cardIsTrump && !bestIsTrump && card.suit !== currentBest.suit) return false;
     return cardPower(card, trumpSuit, cardOrder) > cardPower(currentBest, trumpSuit, bestOrder);
 }
 
