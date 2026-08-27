@@ -10,7 +10,7 @@ import {
     canCallTrump, canCounterTrump,
     getFollowSuit, filterHandBySuit,
     getPairs, getTriples, getBombs,
-    mustLeadPairOrBiggest, getPadCards,
+    mustLeadPairOrBiggest, getPadCards, getBiggestSingleCandidates,
     validateFollow, doesBeat, _canPlayerBeat, canBeatSingle,
 } from './rules.js';
 
@@ -288,7 +288,9 @@ export class GameState {
      * 1. 本局是否还有其他玩家一次领出者都没当过——没有的话直接跳过，规则三本身也已经解除
      * 2. 反主牌必出还没执行完——那个规则优先级更高，领出者必须先打反主的牌，不适用本规则
      * 3. 领出者手里有没有对子（含3同张/连对等）——有对子就轮不到"最大单张"这一分支
-     * 4. 领出者手里最大的单张，是否真的打不过另外两人手里现有的牌
+     * 4. 领出者手里所有"合法最大单张"候选（主牌组+各副牌花色组，见
+     *    getBiggestSingleCandidates），是否全部都打不过另外两人手里现有的牌——
+     *    只要有一个候选能赢，就说明领出者有合法的取胜选择，不触发本规则
      *
      * @param {number} leaderIdx
      * @returns {{leaderIdx: number, drawerIdx: number, card: Card}|null}
@@ -304,14 +306,11 @@ export class GameState {
         if (leader.hand.length === 0) return null;
         if (getPairs(leader.hand, this.trumpSuit).length > 0) return null;
 
-        const best = leader.hand.reduce((b, c) =>
-            cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
+        const candidates = getBiggestSingleCandidates(leader.hand, this.trumpSuit);
+        const anyCandidateWins = candidates.some(best =>
+            !this.players.some((p, i) => i !== leaderIdx && p.hand.some(c => canBeatSingle(c, best, this.trumpSuit)))
         );
-
-        const beatable = this.players.some((p, i) =>
-            i !== leaderIdx && p.hand.some(c => canBeatSingle(c, best, this.trumpSuit))
-        );
-        if (!beatable) return null;
+        if (anyCandidateWins) return null;
 
         let drawerIdx = -1;
         for (let offset = 1; offset <= 2; offset++) {
@@ -419,9 +418,13 @@ export class GameState {
 
             // First-play rule: if any other player hasn't LED a trick yet (not merely
             // "hasn't played a card" — following doesn't count), the leader may freely
-            // choose between a pair-based play (对子/三同张/连对等) or their single
-            // biggest card — not "pair mandatory whenever one exists". This stays in
-            // force across multiple tricks until every player has had a turn to lead.
+            // choose between a pair-based play (对子/三同张/连对等) or a "biggest single"
+            // — not "pair mandatory whenever one exists". "Biggest single" is judged
+            // per suit-group (trump group, or each of the 4 side suits), not by overall
+            // cardPower across the whole hand: side suits have no cross-suit ordering
+            // (规则 2.2), so "the biggest single" from spades and "the biggest single"
+            // from hearts are both legal, independent choices. This stays in force
+            // across multiple tricks until every player has had a turn to lead.
             const anyUnplayed = this.players.some(
                 (p, i) => i !== playerIdx && !p.hasPlayed
             );
@@ -435,10 +438,10 @@ export class GameState {
                     if (playType !== PlayType.SINGLE) {
                         return [false, '有玩家未当过领出者，必须出对子（或连对等）或最大的单张'];
                     }
-                    const best = player.hand.reduce((b, c) =>
-                        cardPower(c, this.trumpSuit) > cardPower(b, this.trumpSuit) ? c : b
-                    );
-                    if (cards[0] !== best) return [false, `必须出最大单张: ${best}`];
+                    const candidates = getBiggestSingleCandidates(player.hand, this.trumpSuit);
+                    if (!candidates.includes(cards[0])) {
+                        return [false, `必须出最大单张（主牌或某个副牌花色里最大的那张）`];
+                    }
                 }
             }
 

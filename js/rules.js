@@ -1067,6 +1067,32 @@ export function mustLeadPairOrBiggest(hand, trumpSuit) {
 }
 
 /**
+ * "最大单张"其实是按主/副牌分开算的，不是整手牌 cardPower 最大的那张——
+ * 主牌大于任何副牌是规则明确规定的，但副牌彼此之间不同花色无大小之分，
+ * 只有同花色才比大小（规则 2.2）。所以一张"合法的最大单张"是指：
+ * - 手里若有主牌，主牌组里最大的那张主牌；或者
+ * - 某个副牌花色组里最大的那张牌（比如常主时，某花色没有A就是K）
+ * 这个函数返回所有这样的候选（每个"组"最多一张），而不是单一答案，
+ * 调用方按需要选（比如领牌时随便选一张，判断"能不能压过对面"时看是否
+ * 有任意一张候选能赢）。
+ * @param {Card[]} hand
+ * @param {string|null} trumpSuit
+ * @returns {Card[]}
+ */
+export function getBiggestSingleCandidates(hand, trumpSuit) {
+    const maxPowerByGroup = new Map(); // suit key ('trump' or SUIT_*) -> max cardPower in that group
+    for (const c of hand) {
+        const key = getSuitOfCard(c, trumpSuit);
+        const power = cardPower(c, trumpSuit);
+        const cur = maxPowerByGroup.get(key);
+        if (cur === undefined || power > cur) maxPowerByGroup.set(key, power);
+    }
+    // 组内可能出现平局（比如常主时黑桃2和方块2都固定是主牌、点数相同，
+    // 规则2.2/2.3"先出者大"意味着两者都是合法的"该组最大"，不能只留一张）。
+    return hand.filter(c => cardPower(c, trumpSuit) === maxPowerByGroup.get(getSuitOfCard(c, trumpSuit)));
+}
+
+/**
  * Returns padding cards to bring a play up to 4 cards (for bombs).
  * @param {Card[]} hand
  * @param {Card[]} originalPlay
