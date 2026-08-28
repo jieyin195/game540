@@ -11,7 +11,7 @@ import {
     getFollowSuit, filterHandBySuit,
     getPairs, getTriples, getBombs,
     mustLeadPairOrBiggest, getPadCards, getBiggestSingleCandidates,
-    validateFollow, doesBeat, _canPlayerBeat, canBeatSingle,
+    validateFollow, doesBeat, _canPlayerBeat,
 } from './rules.js';
 
 // ---------------------------------------------------------------------------
@@ -306,11 +306,11 @@ export class GameState {
         if (leader.hand.length === 0) return null;
         if (getPairs(leader.hand, this.trumpSuit).length > 0) return null;
 
-        const candidates = getBiggestSingleCandidates(leader.hand, this.trumpSuit);
-        const anyCandidateWins = candidates.some(best =>
-            !this.players.some((p, i) => i !== leaderIdx && p.hand.some(c => canBeatSingle(c, best, this.trumpSuit)))
-        );
-        if (anyCandidateWins) return null;
+        const otherHands = this.players.filter((_, i) => i !== leaderIdx).map(p => p.hand);
+        const candidates = getBiggestSingleCandidates(leader.hand, otherHands, this.trumpSuit);
+        // candidates = cards that no other player can beat with a same-suit single (炸弹不算).
+        // If any such card exists, the leader has a winning option → don't trigger forced draw.
+        if (candidates.length > 0) return null;
 
         let drawerIdx = -1;
         for (let offset = 1; offset <= 2; offset++) {
@@ -438,9 +438,10 @@ export class GameState {
                     if (playType !== PlayType.SINGLE) {
                         return [false, '有玩家未当过领出者，必须出对子（或连对等）或最大的单张'];
                     }
-                    const candidates = getBiggestSingleCandidates(player.hand, this.trumpSuit);
+                    const otherHands = this.players.filter((_, i) => i !== playerIdx).map(p => p.hand);
+                    const candidates = getBiggestSingleCandidates(player.hand, otherHands, this.trumpSuit);
                     if (!candidates.includes(cards[0])) {
-                        return [false, `必须出最大单张（主牌或某个副牌花色里最大的那张）`];
+                        return [false, `必须出最大单张（其他玩家用同花色压不过的牌）`];
                     }
                 }
             }
