@@ -1070,26 +1070,39 @@ export function mustLeadPairOrBiggest(hand, trumpSuit) {
  * "最大单张"其实是按主/副牌分开算的，不是整手牌 cardPower 最大的那张——
  * 主牌大于任何副牌是规则明确规定的，但副牌彼此之间不同花色无大小之分，
  * 只有同花色才比大小（规则 2.2）。所以一张"合法的最大单张"是指：
- * - 手里若有主牌，主牌组里最大的那张主牌；或者
- * - 某个副牌花色组里最大的那张牌（比如常主时，某花色没有A就是K）
- * 这个函数返回所有这样的候选（每个"组"最多一张），而不是单一答案，
- * 调用方按需要选（比如领牌时随便选一张，判断"能不能压过对面"时看是否
- * 有任意一张候选能赢）。
+ * - 手里若有主牌，主牌里"散张（pairKey 只有 1 张）"中最大的那张主牌；或者
+ * - 某个副牌花色组里"散张"中最大的那张（比如常主时，红心A有4张是炸弹，
+ *   红心K是孤张，则红心组最大单张是红心K，不是被炸弹占掉的红心A）
+ * 注意：只有孤张（pairKey 计数恰好为 1）才能作为"最大单张"候选——有对子/
+ * 三同张/炸弹的牌属于结构牌，规则三要求出"最大单张"时不能把它们拆散出来。
+ * 如果某花色组里全是成对的牌（没有孤张），该组就没有最大单张候选。
+ * 这个函数返回所有合法候选，调用方按需要选其中一张。
  * @param {Card[]} hand
  * @param {string|null} trumpSuit
  * @returns {Card[]}
  */
 export function getBiggestSingleCandidates(hand, trumpSuit) {
-    const maxPowerByGroup = new Map(); // suit key ('trump' or SUIT_*) -> max cardPower in that group
+    // 1. 统计每个 pairKey 的出现次数，找出孤张
+    const pairKeyCounts = new Map();
     for (const c of hand) {
+        const key = pairKey(c, trumpSuit);
+        pairKeyCounts.set(key, (pairKeyCounts.get(key) ?? 0) + 1);
+    }
+    const singles = hand.filter(c => pairKeyCounts.get(pairKey(c, trumpSuit)) === 1);
+
+    if (singles.length === 0) return []; // 全是成对的牌，没有可出的孤张
+
+    // 2. 按花色组（主牌组 / 各副牌花色组）找各组最大 cardPower
+    const maxPowerByGroup = new Map();
+    for (const c of singles) {
         const key = getSuitOfCard(c, trumpSuit);
         const power = cardPower(c, trumpSuit);
         const cur = maxPowerByGroup.get(key);
         if (cur === undefined || power > cur) maxPowerByGroup.set(key, power);
     }
-    // 组内可能出现平局（比如常主时黑桃2和方块2都固定是主牌、点数相同，
-    // 规则2.2/2.3"先出者大"意味着两者都是合法的"该组最大"，不能只留一张）。
-    return hand.filter(c => cardPower(c, trumpSuit) === maxPowerByGroup.get(getSuitOfCard(c, trumpSuit)));
+
+    // 3. 组内平局（如常主时黑桃2和方块2都是主牌、点数相同）全部算合法候选
+    return singles.filter(c => cardPower(c, trumpSuit) === maxPowerByGroup.get(getSuitOfCard(c, trumpSuit)));
 }
 
 /**
